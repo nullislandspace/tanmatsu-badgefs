@@ -52,6 +52,8 @@ struct badgefs_backend {
     int (*write)(const char *path, const char *buf, size_t size, off_t offset,
                  struct fuse_file_info *fi);
     int (*truncate)(const char *path, off_t size, struct fuse_file_info *fi);
+    int (*fsync)(const char *path, int datasync, struct fuse_file_info *fi);
+    int (*flush)(const char *path, struct fuse_file_info *fi);
 
     /* File/directory metadata */
     int (*rename)(const char *from, const char *to, unsigned int flags);

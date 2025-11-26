@@ -15,7 +15,22 @@
 
 #include "badgefs_ops.h"
 #include "badgefs_backend.h"
-#include "badgefs_backend_mem.h"
+
+/* ============================================================================
+ * Backend Management
+ * ============================================================================ */
+
+static struct badgefs_backend *current_backend = NULL;
+
+struct badgefs_backend *badgefs_get_backend(void)
+{
+    return current_backend;
+}
+
+void badgefs_set_backend(struct badgefs_backend *backend)
+{
+    current_backend = backend;
+}
 
 /* ============================================================================
  * FUSE Lifecycle Callbacks
@@ -173,6 +188,24 @@ int badgefs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
     return backend->truncate(path, size, fi);
 }
 
+int badgefs_fsync(const char *path, int datasync, struct fuse_file_info *fi)
+{
+    struct badgefs_backend *backend = badgefs_get_backend();
+    if (!backend || !backend->fsync)
+        return 0;  /* fsync is optional */
+
+    return backend->fsync(path, datasync, fi);
+}
+
+int badgefs_flush(const char *path, struct fuse_file_info *fi)
+{
+    struct badgefs_backend *backend = badgefs_get_backend();
+    if (!backend || !backend->flush)
+        return 0;  /* flush is optional */
+
+    return backend->flush(path, fi);
+}
+
 /* ============================================================================
  * Metadata Operations
  * ============================================================================ */
@@ -266,6 +299,8 @@ static const struct fuse_operations badgefs_ops = {
     .read       = badgefs_read,
     .write      = badgefs_write,
     .truncate   = badgefs_truncate,
+    .fsync      = badgefs_fsync,
+    .flush      = badgefs_flush,
     .rename     = badgefs_rename,
     .chmod      = badgefs_chmod,
     .chown      = badgefs_chown,

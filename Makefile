@@ -13,9 +13,6 @@ LDFLAGS = $(shell pkg-config fuse3 --libs) \
 # Core FUSE framework
 CORE_SRCS = badgefs.c badgefs_ops.c
 
-# In-memory backend (for testing without badge)
-MEM_BACKEND_SRCS = badgefs_backend_mem.c
-
 # BadgeLink backend (for connecting to badge)
 BADGELINK_SRCS = badgefs_backend_badgelink.c \
                  badgelink_client.c \
@@ -27,11 +24,11 @@ BADGELINK_SRCS = badgefs_backend_badgelink.c \
 NANOPB_SRCS = pb_common.c pb_encode.c pb_decode.c badgelink.pb.c
 
 # All sources
-SRCS = $(CORE_SRCS) $(MEM_BACKEND_SRCS) $(BADGELINK_SRCS) $(NANOPB_SRCS)
+SRCS = $(CORE_SRCS) $(BADGELINK_SRCS) $(NANOPB_SRCS)
 OBJS = $(SRCS:.c=.o)
 
 # Headers
-HEADERS = badgefs_ops.h badgefs_backend.h badgefs_backend_mem.h \
+HEADERS = badgefs_ops.h badgefs_backend.h \
           badgefs_backend_badgelink.h badgelink_client.h \
           badgelink_proto.h badgelink_usb.h badgelink.pb.h \
           cobs.h pb.h pb_common.h pb_encode.h pb_decode.h
@@ -60,7 +57,7 @@ uninstall:
 
 # Usage help
 help:
-	@echo "BadgeFS - FUSE Filesystem Framework with BadgeLink"
+	@echo "BadgeFS - FUSE Filesystem for Tanmatsu Badge"
 	@echo ""
 	@echo "Build targets:"
 	@echo "  make          - Build the filesystem"
@@ -72,13 +69,12 @@ help:
 	@echo ""
 	@echo "Usage:"
 	@echo "  mkdir /tmp/mnt"
-	@echo "  ./badgefs /tmp/mnt            # Mount filesystem (BadgeLink backend)"
-	@echo "  ./badgefs -m /tmp/mnt         # Mount with in-memory backend (testing)"
-	@echo "  ./badgefs -f /tmp/mnt         # Mount in foreground (debug)"
+	@echo "  ./badgefs /tmp/mnt            # Mount filesystem"
+	@echo "  ./badgefs -f /tmp/mnt         # Mount in foreground"
 	@echo "  ./badgefs -d -f /tmp/mnt      # Mount with debug output"
 	@echo "  fusermount -u /tmp/mnt        # Unmount filesystem"
 	@echo ""
-	@echo "BadgeLink filesystem layout:"
+	@echo "Filesystem layout:"
 	@echo "  /sd     - SD card on badge"
 	@echo "  /int    - Internal memory"
 	@echo "  /appfs  - Application filesystem (apps as <slug>.bin files)"

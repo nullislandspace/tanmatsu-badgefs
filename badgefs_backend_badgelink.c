@@ -665,6 +665,106 @@ static int bl_open(const char *path, struct fuse_file_info *fi)
     return 0;
 }
 
+/*
+ * Helper: flush pending writes to device without removing from open list.
+ * Must be called with lock held.
+ * Returns 0 on success, negative error code on failure.
+ */
+static int flush_open_file(struct open_file *f, const char *path)
+{
+    if (!f->modified)
+        return 0;
+
+    int ret = 0;
+
+    if (f->is_appfs) {
+        struct badgelink_app app;
+        memset(&app, 0, sizeof(app));
+        strncpy(app.slug, f->slug, sizeof(app.slug) - 1);
+
+        /* Check if app already exists to preserve title/version */
+        struct badgelink_app existing;
+        ret = badgelink_appfs_stat(&state.client, f->slug, &existing);
+        if (ret == 0) {
+            strncpy(app.title, existing.title, sizeof(app.title) - 1);
+            app.version = existing.version;
+        } else {
+            strncpy(app.title, "Application", sizeof(app.title) - 1);
+            app.version = 0;
+        }
+
+        /* Override with pending xattr if set */
+        if (f->has_pending_title) {
+            strncpy(app.title, f->pending_title, sizeof(app.title) - 1);
+        }
+        if (f->has_pending_version) {
+            app.version = f->pending_version;
+        }
+        app.size = f->size;
+
+        ret = badgelink_appfs_upload(&state.client, &app, f->buffer, f->size);
+    } else {
+        const char *device_path = translate_path(path);
+        ret = badgelink_fs_upload(&state.client, device_path, f->buffer, f->size);
+    }
+
+    if (ret == 0) {
+        /* Mark as not modified after successful upload */
+        f->modified = false;
+    }
+
+    return ret;
+}
+
+static int bl_fsync(const char *path, int datasync, struct fuse_file_info *fi)
+{
+    (void)datasync;
+    (void)fi;
+
+    fprintf(stderr, "DEBUG bl_fsync: path=%s\n", path);
+
+    pthread_mutex_lock(&state.lock);
+
+    struct open_file *f = find_open_file(path);
+    if (!f) {
+        pthread_mutex_unlock(&state.lock);
+        return 0;  /* No open file to sync */
+    }
+
+    int ret = flush_open_file(f, path);
+    if (ret < 0) {
+        fprintf(stderr, "badgefs_badgelink: fsync failed for %s: %s\n",
+                path, strerror(-ret));
+    }
+
+    pthread_mutex_unlock(&state.lock);
+    return ret;
+}
+
+static int bl_flush(const char *path, struct fuse_file_info *fi)
+{
+    (void)fi;
+
+    fprintf(stderr, "DEBUG bl_flush: path=%s\n", path);
+
+    pthread_mutex_lock(&state.lock);
+
+    struct open_file *f = find_open_file(path);
+    if (!f) {
+        pthread_mutex_unlock(&state.lock);
+        return 0;  /* No open file to flush */
+    }
+
+    int ret = flush_open_file(f, path);
+    if (ret < 0) {
+        fprintf(stderr, "badgefs_badgelink: flush failed for %s: %s\n",
+                path, strerror(-ret));
+    }
+
+    pthread_mutex_unlock(&state.lock);
+    return ret;
+}
+
 static int bl_release(const char *path, struct fuse_file_info *fi)
 {
     (void)fi;
@@ -1183,6 +1283,34 @@ static int bl_listxattr(const char *path, char *list, size_t size)
 }
 
 /* ============================================================================
+ * Pre-mount Connection Test
+ * ============================================================================ */
+
+int badgefs_backend_badgelink_test_connection(void)
+{
+    struct badgelink_client test_client;
+
+    int ret = badgelink_client_init(&test_client);
+    if (ret < 0) {
+        fprintf(stderr, "badgefs: failed to init USB: %s\n", strerror(-ret));
+        return ret;
+    }
+
+    ret = badgelink_client_connect(&test_client);
+    if (ret < 0) {
+        fprintf(stderr, "badgefs: badge not found (is it connected?)\n");
+        badgelink_client_cleanup(&test_client);
+        return ret;
+    }
+
+    /* Connection successful - disconnect and let bl_init handle the real connection */
+    badgelink_client_disconnect(&test_client);
+    badgelink_client_cleanup(&test_client);
+
+    return 0;
+}
+
+/* ============================================================================
  * Backend Structure
  * ============================================================================ */
 
@@ -1200,6 +1328,8 @@ static struct badgefs_backend badgelink_backend = {
     .read       = bl_read,
     .write      = bl_write,
     .truncate   = bl_truncate,
+    .fsync      = bl_fsync,
+    .flush      = bl_flush,
     .rename     = bl_rename,
     .chmod      = bl_chmod,
     .chown      = bl_chown,

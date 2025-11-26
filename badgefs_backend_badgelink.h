@@ -21,4 +21,11 @@
  */
 struct badgefs_backend *badgefs_backend_badgelink_get(void);
 
+/*
+ * Test connection to badge before mounting.
+ * This should be called before fuse_main() to verify the badge is connected.
+ * Returns 0 on success, negative error code on failure.
+ */
+int badgefs_backend_badgelink_test_connection(void);
+
 #endif /* BADGEFS_BACKEND_BADGELINK_H */

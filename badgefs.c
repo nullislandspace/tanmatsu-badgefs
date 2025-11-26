@@ -30,7 +30,6 @@
 
 #include "badgefs_ops.h"
 #include "badgefs_backend.h"
-#include "badgefs_backend_mem.h"
 #include "badgefs_backend_badgelink.h"
 
 /*
@@ -43,11 +42,7 @@ static void print_usage(const char *progname)
         "\n"
         "Usage: %s [options] <mountpoint>\n"
         "\n"
-        "BadgeFS Options:\n"
-        "  -m              Use in-memory backend (for testing without badge)\n"
-        "                  Default is BadgeLink backend (connects to badge)\n"
-        "\n"
-        "FUSE Options:\n"
+        "Options:\n"
         "  -f              Run in foreground (don't daemonize)\n"
         "  -d              Enable debug output (implies -f)\n"
         "  -s              Run single-threaded\n"
@@ -62,18 +57,17 @@ static void print_usage(const char *progname)
         "\n"
         "Examples:\n"
         "  mkdir /tmp/mnt\n"
-        "  %s /tmp/mnt                 # Mount with BadgeLink backend\n"
-        "  %s -m /tmp/mnt              # Mount with in-memory backend\n"
+        "  %s /tmp/mnt                 # Mount filesystem\n"
         "  %s -f /tmp/mnt              # Mount in foreground\n"
         "  %s -d -f /tmp/mnt           # Debug mode\n"
         "  fusermount -u /tmp/mnt      # Unmount\n"
         "\n"
-        "BadgeLink filesystem layout:\n"
+        "Filesystem layout:\n"
         "  /sd             SD card on badge\n"
         "  /int            Internal memory on badge\n"
         "  /appfs          Application filesystem (apps as <slug>.bin)\n"
         "\n",
-        progname, progname, progname, progname, progname);
+        progname, progname, progname, progname);
 }
 
 /*
@@ -88,7 +82,6 @@ static void print_version(void)
 
 int main(int argc, char *argv[])
 {
-    int use_mem_backend = 0;
     int new_argc = 0;
     char **new_argv = malloc((argc + 2) * sizeof(char *));  /* +2 for -s flag */
     if (!new_argv) {
@@ -115,10 +108,6 @@ int main(int argc, char *argv[])
             free(new_argv);
             return 0;
         }
-        if (strcmp(argv[i], "-m") == 0) {
-            use_mem_backend = 1;
-            continue;  /* Don't pass to FUSE */
-        }
         new_argv[new_argc++] = argv[i];
     }
 
@@ -130,21 +119,17 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /*
-     * Set up the storage backend.
-     *
-     * By default, we use the BadgeLink backend which connects to
-     * the Tanmatsu badge via USB.
-     *
-     * Use -m option for in-memory backend (for testing without badge).
-     */
-    if (use_mem_backend) {
-        printf("BadgeFS: Using in-memory backend (testing mode)\n");
-        badgefs_set_backend(NULL);  /* NULL = default in-memory backend */
-    } else {
-        printf("BadgeFS: Using BadgeLink backend (connecting to badge)\n");
-        badgefs_set_backend(badgefs_backend_badgelink_get());
+    /* Test connection before mounting to avoid invalid mount */
+    printf("BadgeFS: Connecting to badge...\n");
+    int conn_ret = badgefs_backend_badgelink_test_connection();
+    if (conn_ret < 0) {
+        fprintf(stderr, "BadgeFS: Cannot mount - badge not connected\n");
+        free(new_argv);
+        return 1;
     }
+    printf("BadgeFS: Badge found, mounting filesystem\n");
+
+    badgefs_set_backend(badgefs_backend_badgelink_get());
 
     /*
      * Get the FUSE operations structure and start FUSE.
