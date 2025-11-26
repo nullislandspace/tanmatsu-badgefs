@@ -1,0 +1,11 @@
+# Object files
+*.o
+
+# Mercurial
+.hg
+.hgignore
+
+# Binary
+badgefs
+test_download
+application.bin
