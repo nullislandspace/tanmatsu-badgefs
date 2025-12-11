@@ -55,6 +55,13 @@ install: $(TARGET)
 uninstall:
 	rm -f /usr/local/bin/$(TARGET)
 
+mount: $(TARGET)
+	mkdir -p /tmp/mnt
+	./badgefs /tmp/mnt
+
+umount: $(TARGET)
+	./badgefs -u /tmp/mnt
+
 # Usage help
 help:
 	@echo "BadgeFS - FUSE Filesystem for Tanmatsu Badge"
