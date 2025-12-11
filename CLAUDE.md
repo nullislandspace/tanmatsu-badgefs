@@ -2,15 +2,16 @@
 
 ## Project Overview
 
-BadgeFS is a FUSE3 virtual filesystem framework with a pluggable backend architecture. The default backend stores data in memory; custom backends can be implemented for network storage, databases, or device communication.
+BadgeFS is a FUSE3 virtual filesystem for the Tanmatsu badge. It connects to the badge via USB and exposes the badge's filesystems (SD card, internal storage, AppFS) as a standard Linux mount point.
 
 ## Requirements
 
 - Create/delete directories
 - Upload/download files (read/write)
 - Full directory hierarchy support
-- Thread-safe operation
-- Pluggable storage backend
+- Thread-safe operation (single-threaded due to USB)
+- Pre-mount connection validation
+- fsync/flush support for reliable writes
 
 ## Implementation Status
 
@@ -29,7 +30,7 @@ BadgeFS is a FUSE3 virtual filesystem framework with a pluggable backend archite
 ### Phase 3: Implementation
 - [x] Create Makefile with pkg-config
 - [x] Implement abstract backend interface (badgefs_backend.h)
-- [x] Implement in-memory backend (badgefs_backend_mem.c)
+- [x] Implement BadgeLink USB backend (badgefs_backend_badgelink.c)
 - [x] Implement FUSE operations wrapper (badgefs_ops.c)
 - [x] Create main entry point (badgefs.c)
 
@@ -52,32 +53,47 @@ BadgeFS is a FUSE3 virtual filesystem framework with a pluggable backend archite
 ## Architecture
 
 ```
-badgefs.c              Main entry point, argument parsing
+badgefs.c                     Main entry point, argument parsing
+    │                         Pre-mount connection test
+    ▼
+badgefs_ops.c                 FUSE callbacks (delegates to backend)
     │
     ▼
-badgefs_ops.c          FUSE callbacks (delegates to backend)
+badgefs_backend.h             Abstract interface (function pointers)
     │
     ▼
-badgefs_backend.h      Abstract interface (function pointers)
+badgefs_backend_badgelink.c   BadgeLink USB backend
+    │                         Path routing (/sd, /int, /appfs)
+    │                         Write buffering (upload on close)
+    ▼
+badgelink_client.c            High-level operations (stat, list, upload, download)
     │
     ▼
-badgefs_backend_mem.c  Default in-memory implementation
-                       (replace with custom backend)
+badgelink_proto.c             Protocol layer (COBS, CRC32, protobuf)
+    │
+    ▼
+badgelink_usb.c               USB transport (libusb bulk transfers)
 ```
 
-## Files Created
+## Files
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| Makefile | 51 | Build system with pkg-config |
-| badgefs.c | 110 | Main entry, help, version |
-| badgefs_ops.h | 65 | FUSE callback declarations |
-| badgefs_ops.c | 198 | FUSE callback implementations |
-| badgefs_backend.h | 81 | Abstract storage interface |
-| badgefs_backend_mem.h | 41 | Memory backend declarations |
-| badgefs_backend_mem.c | 590 | Full in-memory filesystem |
-| FUSE.md | ~700 | Comprehensive implementation guide |
-| README.md | 60 | Quick start guide |
+| File | Purpose |
+|------|---------|
+| Makefile | Build system with pkg-config |
+| badgefs.c | Main entry, help, version, pre-mount connection test |
+| badgefs_ops.h | FUSE callback declarations |
+| badgefs_ops.c | FUSE callback implementations |
+| badgefs_backend.h | Abstract storage interface |
+| badgefs_backend_badgelink.c | BadgeLink backend (path routing, write buffering, xattr) |
+| badgefs_backend_badgelink.h | BadgeLink backend header |
+| badgelink_client.c | High-level client API (stat, list, upload, download) |
+| badgelink_proto.c | Protocol layer (COBS framing, CRC32, protobuf) |
+| badgelink_usb.c | USB transport layer (libusb bulk transfers) |
+| cobs.c | COBS encoding/decoding |
+| badgelink.pb.c | Nanopb-generated protobuf code |
+| pb_*.c | Nanopb library files |
+| FUSE.md | Comprehensive FUSE implementation guide |
+| README.md | Quick start guide |
 
 ## Implemented FUSE Operations
 
@@ -100,14 +116,20 @@ badgefs_backend_mem.c  Default in-memory implementation
 | chmod | Change permissions |
 | chown | Change owner/group |
 | utimens | Update timestamps |
+| fsync | Sync file to storage |
+| flush | Flush file buffers |
+| getxattr | Get extended attributes (AppFS title/version) |
+| setxattr | Set extended attributes |
+| listxattr | List extended attributes |
 
 ## Technical Specifications
 
 - **FUSE Version:** 3.1+ (FUSE_USE_VERSION 31)
-- **Thread Safety:** pthread_rwlock (read/write locks)
-- **Storage:** In-memory tree structure with linked-list children
+- **Thread Safety:** Single-threaded mode (USB not thread-safe)
+- **Storage:** BadgeLink USB protocol to Tanmatsu badge
 - **Path Handling:** Full nested directory support
 - **Error Handling:** Returns -errno (POSIX convention)
+- **Pre-mount Validation:** Connection test before mounting
 
 ## Build & Test Results
 
@@ -140,18 +162,6 @@ make
 # Unmount
 fusermount -u /tmp/mnt
 ```
-
-## Extending with Custom Backend
-
-To add a custom storage backend (e.g., for BadgeLink communication):
-
-1. Copy `badgefs_backend_mem.c` as template
-2. Implement all functions in `struct badgefs_backend`
-3. Replace backend initialization in `badgefs.c`:
-   ```c
-   badgefs_set_backend(my_custom_backend_get());
-   ```
-4. Update Makefile SRCS to include new file
 
 ## Dependencies
 
@@ -822,5 +832,133 @@ setfattr -n user.appfs.version -v "42" /tmp/badgefs_mnt/appfs/myapp.bin
 | Overwrite preserves attrs | PASS |
 
 ---
-**Last Updated:** 2025-11-26
-**Status:** FULLY FUNCTIONAL - Upload, download, mkdir, rmdir, delete, xattr all working
+
+## Recent Changes (2025-11-26)
+
+### Pre-mount Connection Validation
+
+Added connection test before mounting to avoid an invalid mount state when the badge is not connected. Previously, if the badge wasn't connected, badgefs would mount but all operations would fail. Now it fails early with a clear error message.
+
+**badgefs.c:**
+```c
+/* Test connection before mounting to avoid invalid mount */
+printf("BadgeFS: Connecting to badge...\n");
+int conn_ret = badgefs_backend_badgelink_test_connection();
+if (conn_ret < 0) {
+    fprintf(stderr, "BadgeFS: Cannot mount - badge not connected\n");
+    free(new_argv);
+    return 1;
+}
+printf("BadgeFS: Badge found, mounting filesystem\n");
+```
+
+### fsync/flush Support
+
+Added fsync and flush FUSE callbacks for reliable writes. These are called when applications sync file data to storage (e.g., via `sync` command or `fsync()` syscall).
+
+**Test:**
+```bash
+echo "test" > /tmp/badgefs_mnt/sd/test.txt
+sync  # Triggers bl_fsync and bl_flush
+```
+
+### In-memory Backend Removal
+
+Removed the in-memory backend (`badgefs_backend_mem.c`, `badgefs_backend_mem.h`) as BadgeFS is designed to work only with the real Tanmatsu badge via BadgeLink USB protocol. The backend management functions (`badgefs_get_backend`, `badgefs_set_backend`) were moved to `badgefs_ops.c`.
+
+---
+
+## Large File Upload Investigation (2025-11-27)
+
+### Problem Description
+
+Large file uploads (20MB+) were timing out. Initially failed around ~1MB, then after USB read fixes failed at XferFinish (final sync) despite all chunks uploading successfully.
+
+### Root Cause Analysis
+
+Two separate issues were identified:
+
+#### Issue 1: USB Read Timeout (Fixed)
+
+**Problem:** Uploads failing around ~1MB with timeout errors during chunk upload.
+
+**Root Cause:** The USB read function used the caller's timeout for the first read, then 5ms for subsequent reads. Python's `read_all()` uses 5ms for ALL reads, allowing faster polling.
+
+**Fix in badgelink_usb.c:**
+```c
+/*
+ * Match Python's read_all() EXACTLY:
+ * Python uses 5ms timeout for EVERY read, not just subsequent ones.
+ * The timeout_ms parameter is ignored - we always use USB_READ_TIMEOUT_MS.
+ */
+(void)timeout_ms;  /* Ignored - always use 5ms like Python */
+
+#define USB_MAX_PACKET_SIZE 32  /* Actual wMaxPacketSize from device */
+#define USB_READ_TIMEOUT_MS 5   /* Match Python's 5ms timeout */
+
+/* Always use 5ms timeout like Python's read_all() */
+int ret = libusb_bulk_transfer(usb->handle, BADGELINK_EP_IN,
+                               buf + total_read, chunk_size,
+                               &transferred, USB_READ_TIMEOUT_MS);
+```
+
+**Result:** Upload progress improved from ~1MB to full 20MB (all 5120 chunks).
+
+#### Issue 2: XferFinish Timeout (Badge Firmware Limitation)
+
+**Problem:** After all chunks uploaded successfully, XferFinish request times out. Badge doesn't respond while syncing large files to SD card.
+
+**Observation:** This is the same issue Python's badgelink.py has - it also fails at 99% on XferFinish for large files with "TimeoutError: Receive timed out".
+
+**Mitigation in badgelink_client.c:**
+Added dynamic timeout based on file size:
+```c
+/* Extra timeout for XferFinish per MB (badge needs time to sync large files) */
+#define FINISH_TIMEOUT_PER_MB_MS 2000
+
+/* Maximum finish timeout for very large files */
+#define FINISH_TIMEOUT_MAX_MS 120000
+
+/* Calculate timeout: base + 2s per MB */
+int finish_timeout = XFER_TIMEOUT_MS + (size / (1024 * 1024)) * FINISH_TIMEOUT_PER_MB_MS;
+if (finish_timeout > FINISH_TIMEOUT_MAX_MS)
+    finish_timeout = FINISH_TIMEOUT_MAX_MS;
+```
+
+For a 20MB file: 10s + 20×2s = 50s timeout for XferFinish.
+
+### Test Results
+
+| File Size | Chunk Upload | XferFinish | Notes |
+|-----------|--------------|------------|-------|
+| 100KB | SUCCESS | SUCCESS | Works reliably |
+| 1MB | SUCCESS | SUCCESS | Works reliably |
+| 10MB | SUCCESS | SUCCESS | Works reliably |
+| 20MB | SUCCESS (all 5120 chunks) | TIMEOUT | Badge blocks during SD sync |
+
+### Known Limitation: Badge Firmware
+
+**Very large files (20MB+) may fail on XferFinish** due to badge firmware behavior:
+
+1. Badge successfully receives all data chunks
+2. Badge sends XferFinish request to close/sync file
+3. Badge becomes unresponsive while writing to SD card
+4. Badge doesn't respond to XferFinish within timeout
+5. File is NOT saved despite all data being uploaded
+
+This is a badge firmware limitation, not a BadgeFS bug. The same behavior occurs with Python's badgelink.py tool.
+
+**Workarounds:**
+- Use smaller files (<10MB recommended)
+- If upload fails at XferFinish, wait ~60s for badge to recover before retrying
+- Consider using faster SD cards
+
+### Files Modified
+
+- `badgelink_usb.c` - Always use 5ms timeout for USB reads (match Python exactly)
+- `badgelink_client.c` - Dynamic XferFinish timeout based on file size
+- `badgelink_proto.c` - Increased retry count to 5, added 50ms retry delay
+
+---
+**Last Updated:** 2025-11-27
+**Status:** FULLY FUNCTIONAL - Upload, download, mkdir, rmdir, delete, xattr, fsync/flush all working. Note: Very large files (20MB+) may timeout on XferFinish due to badge firmware limitations.

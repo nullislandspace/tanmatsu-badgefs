@@ -8,17 +8,17 @@
  *   badgefs [options] <mountpoint>
  *
  * Options:
- *   -m          Use in-memory backend (for testing without badge)
+ *   -u          Unmount the filesystem
  *   -f          Run in foreground (don't daemonize)
  *   -d          Enable debug output (implies -f)
  *   -s          Run single-threaded
  *   -o <opts>   Mount options (e.g., -o allow_other)
  *
  * Examples:
- *   badgefs /mnt/badge           # Mount BadgeLink backend (default)
- *   badgefs -m /mnt/badge        # Mount in-memory backend (testing)
+ *   badgefs /mnt/badge           # Mount filesystem
  *   badgefs -f /mnt/badge        # Mount in foreground
  *   badgefs -d -f /mnt/badge     # Debug mode with output
+ *   badgefs -u /mnt/badge        # Unmount filesystem
  */
 
 #define FUSE_USE_VERSION 31
@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <fuse3/fuse.h>
 
 #include "badgefs_ops.h"
@@ -43,6 +44,7 @@ static void print_usage(const char *progname)
         "Usage: %s [options] <mountpoint>\n"
         "\n"
         "Options:\n"
+        "  -u              Unmount the filesystem\n"
         "  -f              Run in foreground (don't daemonize)\n"
         "  -d              Enable debug output (implies -f)\n"
         "  -s              Run single-threaded\n"
@@ -60,14 +62,14 @@ static void print_usage(const char *progname)
         "  %s /tmp/mnt                 # Mount filesystem\n"
         "  %s -f /tmp/mnt              # Mount in foreground\n"
         "  %s -d -f /tmp/mnt           # Debug mode\n"
-        "  fusermount -u /tmp/mnt      # Unmount\n"
+        "  %s -u /tmp/mnt              # Unmount filesystem\n"
         "\n"
         "Filesystem layout:\n"
         "  /sd             SD card on badge\n"
         "  /int            Internal memory on badge\n"
         "  /appfs          Application filesystem (apps as <slug>.bin)\n"
         "\n",
-        progname, progname, progname, progname);
+        progname, progname, progname, progname, progname);
 }
 
 /*
@@ -80,8 +82,27 @@ static void print_version(void)
            FUSE_MAJOR_VERSION, FUSE_MINOR_VERSION);
 }
 
+/*
+ * Unmount the filesystem using fusermount
+ */
+static int do_unmount(const char *mountpoint)
+{
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd), "fusermount -u '%s'", mountpoint);
+    int status = system(cmd);
+    int ret = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    if (ret == 0) {
+        printf("BadgeFS: Unmounted %s\n", mountpoint);
+    } else {
+        fprintf(stderr, "BadgeFS: Failed to unmount %s\n", mountpoint);
+    }
+    return ret;
+}
+
 int main(int argc, char *argv[])
 {
+    int do_unmount_flag = 0;
+    const char *mountpoint = NULL;
     int new_argc = 0;
     char **new_argv = malloc((argc + 2) * sizeof(char *));  /* +2 for -s flag */
     if (!new_argv) {
@@ -108,7 +129,25 @@ int main(int argc, char *argv[])
             free(new_argv);
             return 0;
         }
+        if (strcmp(argv[i], "-u") == 0) {
+            do_unmount_flag = 1;
+            continue;  /* Don't pass -u to FUSE */
+        }
         new_argv[new_argc++] = argv[i];
+        /* Track mountpoint (last non-option argument) */
+        if (argv[i][0] != '-') {
+            mountpoint = argv[i];
+        }
+    }
+
+    /* Handle unmount request */
+    if (do_unmount_flag) {
+        free(new_argv);
+        if (!mountpoint) {
+            fprintf(stderr, "Error: No mountpoint specified for unmount\n");
+            return 1;
+        }
+        return do_unmount(mountpoint);
     }
 
     /* Ensure we have at least a mountpoint argument */
@@ -143,7 +182,7 @@ int main(int argc, char *argv[])
     const struct fuse_operations *ops = badgefs_get_operations();
 
     printf("BadgeFS: Starting FUSE filesystem...\n");
-    printf("BadgeFS: Use 'fusermount -u <mountpoint>' to unmount\n");
+    printf("BadgeFS: Use '%s -u <mountpoint>' to unmount\n", argv[0]);
 
     int ret = fuse_main(new_argc, new_argv, ops, NULL);
 

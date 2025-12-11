@@ -834,6 +834,10 @@ static int bl_release(const char *path, struct fuse_file_info *fi)
         if (ret < 0) {
             fprintf(stderr, "badgefs_badgelink: upload failed for %s: %s\n",
                     path, strerror(-ret));
+            /* Still need to clean up the open file entry */
+            remove_open_file(f);
+            pthread_mutex_unlock(&state.lock);
+            return ret;
         } else {
             fprintf(stderr, "DEBUG bl_release: upload succeeded\n");
         }

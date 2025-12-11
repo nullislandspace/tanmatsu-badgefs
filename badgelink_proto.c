@@ -246,12 +246,19 @@ static int recv_frame(struct badgelink_proto *proto, uint8_t *payload,
     size_t frame_len;
     struct timespec start, now;
     clock_gettime(CLOCK_MONOTONIC, &start);
-    int first_read = 1;
 
     /*
      * Try to find a complete frame, reading more data if needed.
-     * Use longer timeout for first read (waiting for badge to start responding)
-     * then short timeouts for subsequent reads (catching streaming data).
+     *
+     * Match Python's tight polling behavior:
+     * - Use short read timeouts (100ms max) for rapid polling
+     * - Rely on overall timeout to control total wait time
+     * - Python's read_all() uses 5ms per USB read and returns quickly,
+     *   then recv_frame loops rapidly checking for complete frames
+     *
+     * IMPORTANT: Don't use the full timeout_ms for reads! That would
+     * consume the entire timeout budget on a single failed read, leaving
+     * no time for retries.
      */
     while ((frame = find_frame(proto, &frame_len)) == NULL) {
         /* Check overall timeout */
@@ -261,17 +268,11 @@ static int recv_frame(struct badgelink_proto *proto, uint8_t *payload,
         if (elapsed_ms >= timeout_ms)
             return -ETIMEDOUT;
 
-        /*
-         * Match Python's tight polling behavior:
-         * - First read: use longer timeout to wait for badge to start responding
-         * - Subsequent reads: use very short timeout (10ms) for rapid polling
-         *
-         * Python's read_all() uses 5ms per USB read and returns quickly when
-         * no data is available, then immediately polls again. We match this
-         * by using short timeouts after the first read.
-         */
-        int read_timeout = first_read ? timeout_ms : 10;
-        first_read = 0;
+        /* Use very short read timeout - max 20ms for rapid polling like Python */
+        int remaining_ms = timeout_ms - elapsed_ms;
+        int read_timeout = remaining_ms < 20 ? remaining_ms : 20;
+        if (read_timeout < 5)
+            read_timeout = 5;
 
         int ret = fill_rx_buffer(proto, read_timeout);
         if (ret < 0 && ret != -ETIMEDOUT)
@@ -491,26 +492,26 @@ int badgelink_proto_request(struct badgelink_proto *proto,
     /* Use same serial for ALL retries (like Python) */
     uint32_t serial = proto->serial_no++;
 
-    for (int tries = 0; tries < 3; tries++) {
-        /* On retry: clear rx_buf to avoid corruption from stale data.
-         * When we timeout after receiving partial data (e.g., 4096 bytes without
-         * frame terminator), retrying would mix old and new data, causing CRC errors.
-         */
+    /*
+     * Match Python's simple_request behavior:
+     * - Send request, wait for response
+     * - On timeout, just resend (don't drain USB - response might still be coming)
+     * - Badge ignores duplicate requests or sends same response
+     * - Keep any buffered data - it might contain the response
+     */
+    for (int tries = 0; tries < 5; tries++) {
         if (tries > 0) {
-            fprintf(stderr, "DEBUG proto_request: retry %d (keeping serial=%lu), rx_buf has %zu bytes\n",
-                    tries, (unsigned long)serial, proto->rx_len);
-            /* Clear stale data and wait before retry.
-             * The badge might be stuck mid-transfer; give it time to recover.
+            fprintf(stderr, "DEBUG proto_request: retry %d (serial=%lu)\n",
+                    tries, (unsigned long)serial);
+            /*
+             * DON'T drain USB on retry! The response might still be in transit.
+             * Python doesn't drain - it just resends and waits.
+             * By draining, we throw away the response that was coming.
+             *
+             * Small delay before retry to give badge time to finish processing
+             * the previous request if it was just slow.
              */
-            proto->rx_len = 0;
-            proto->rx_pos = 0;
-            /* Drain any pending USB data */
-            uint8_t drain_buf[256];
-            while (badgelink_usb_read(&proto->usb, drain_buf, sizeof(drain_buf), 50) > 0) {
-                /* Keep draining */
-            }
-            /* Wait for badge to settle */
-            usleep(100000);  /* 100ms delay before retry */
+            usleep(50000);  /* 50ms delay before retry */
         }
 
         /* Build request packet with consistent serial */
@@ -531,16 +532,16 @@ int badgelink_proto_request(struct badgelink_proto *proto,
         }
         fprintf(stderr, "DEBUG proto_request: send succeeded\n");
 
-        /* Receive response - may need multiple attempts to get the right one */
+        /* Receive response - keep trying until we get the right one or timeout */
         badgelink_Packet resp_packet;
-        for (int recv_tries = 0; recv_tries < 5; recv_tries++) {
+        for (int recv_tries = 0; recv_tries < 10; recv_tries++) {
             fprintf(stderr, "DEBUG proto_request: waiting for response (recv_try=%d timeout=%dms)\n",
                     recv_tries, timeout_ms);
             ret = badgelink_proto_recv_packet(proto, &resp_packet, timeout_ms);
             if (ret < 0) {
                 fprintf(stderr, "DEBUG proto_request: recv failed: %d\n", ret);
                 last_ret = ret;
-                break;
+                break;  /* Timeout - will retry sending */
             }
             fprintf(stderr, "DEBUG proto_request: recv got packet serial=%lu which=%d\n",
                     (unsigned long)resp_packet.serial, resp_packet.which_packet);
@@ -567,11 +568,10 @@ int badgelink_proto_request(struct badgelink_proto *proto,
                 return 0;
             }
 
-            /* Wrong serial - might be stale response, keep trying to receive */
-            fprintf(stderr, "DEBUG proto_request: mismatch - expected serial=%lu got=%lu, which=%d (want %d)\n",
-                    (unsigned long)serial, (unsigned long)resp_packet.serial,
-                    resp_packet.which_packet, badgelink_Packet_response_tag);
-            /* Don't break, keep trying to receive the right packet */
+            /* Wrong serial - stale response from previous request, skip it */
+            fprintf(stderr, "DEBUG proto_request: stale response serial=%lu (expected %lu), skipping\n",
+                    (unsigned long)resp_packet.serial, (unsigned long)serial);
+            /* Continue receiving - our response might be next */
         }
     }
 

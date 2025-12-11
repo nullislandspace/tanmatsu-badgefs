@@ -118,12 +118,10 @@ void badgelink_usb_cleanup(struct badgelink_usb *usb)
 /*
  * Write data to the badge.
  *
- * Send data in chunks with delays between them, matching the Python
- * implementation behavior. This is important for larger transfers
- * (like file upload chunks) where the badge may need time to process.
+ * Match Python's behavior: write all data in a loop, with 10ms delay
+ * after each write. Python's pyUSB handles bulk transfer segmentation
+ * internally, so we let libusb do the same.
  */
-#define USB_WRITE_CHUNK_SIZE 512  /* USB full-speed bulk max packet size */
-
 int badgelink_usb_write(struct badgelink_usb *usb, const uint8_t *data,
                         size_t len, int timeout_ms)
 {
@@ -135,16 +133,12 @@ int badgelink_usb_write(struct badgelink_usb *usb, const uint8_t *data,
 
     size_t total_sent = 0;
 
-    fprintf(stderr, "DEBUG usb_write: sending %zu bytes in chunks\n", len);
+    fprintf(stderr, "DEBUG usb_write: sending %zu bytes\n", len);
     while (total_sent < len) {
-        size_t chunk_size = len - total_sent;
-        if (chunk_size > USB_WRITE_CHUNK_SIZE)
-            chunk_size = USB_WRITE_CHUNK_SIZE;
-
         int transferred = 0;
         int ret = libusb_bulk_transfer(usb->handle, BADGELINK_EP_OUT,
                                        (unsigned char *)data + total_sent,
-                                       chunk_size, &transferred, timeout_ms);
+                                       len - total_sent, &transferred, timeout_ms);
 
         if (ret < 0) {
             if (ret == LIBUSB_ERROR_TIMEOUT)
@@ -156,7 +150,7 @@ int badgelink_usb_write(struct badgelink_usb *usb, const uint8_t *data,
 
         total_sent += transferred;
 
-        /* Small delay after each chunk like Python does (10ms) */
+        /* 10ms delay after each write like Python does */
         usleep(10000);
     }
     fprintf(stderr, "DEBUG usb_write: sent %zu bytes total\n", total_sent);
@@ -187,10 +181,9 @@ int badgelink_usb_read(struct badgelink_usb *usb, uint8_t *buf,
         return 0;
 
     size_t total_read = 0;
-    int first_read = 1;
 
     /*
-     * Match Python's read_all() exactly:
+     * Match Python's read_all() EXACTLY:
      *   while True:
      *       try:
      *           new_data = bytes(ep_in.read(wMaxPacketSize, 5))
@@ -199,9 +192,12 @@ int badgelink_usb_read(struct badgelink_usb *usb, uint8_t *buf,
      *           break
      *   return data
      *
-     * Key: Read exactly 32 bytes at a time (wMaxPacketSize), 5ms timeout.
-     * When timeout occurs, return what we have.
+     * CRITICAL: Python uses 5ms timeout for EVERY read, not just subsequent ones.
+     * This allows fast polling when no data is available.
+     * The timeout_ms parameter is ignored - we always use USB_READ_TIMEOUT_MS.
      */
+    (void)timeout_ms;  /* Ignored - always use 5ms like Python */
+
     while (total_read < max_len) {
         int transferred = 0;
 
@@ -210,19 +206,16 @@ int badgelink_usb_read(struct badgelink_usb *usb, uint8_t *buf,
         if (chunk_size > USB_MAX_PACKET_SIZE)
             chunk_size = USB_MAX_PACKET_SIZE;
 
-        /* First read uses caller's timeout, subsequent reads use 5ms */
-        int read_timeout = first_read ? timeout_ms : USB_READ_TIMEOUT_MS;
-
+        /* Always use 5ms timeout like Python's read_all() */
         int ret = libusb_bulk_transfer(usb->handle, BADGELINK_EP_IN,
                                        buf + total_read,
                                        chunk_size,
                                        &transferred,
-                                       read_timeout);
+                                       USB_READ_TIMEOUT_MS);
 
         /* Always count transferred bytes, even on timeout */
         if (transferred > 0) {
             total_read += transferred;
-            first_read = 0;
         }
 
         if (ret == LIBUSB_ERROR_TIMEOUT) {

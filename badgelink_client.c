@@ -21,6 +21,12 @@
 /* Timeout for starting file transfers - match Python's xfer_timeout = 10s */
 #define XFER_TIMEOUT_MS 10000
 
+/* Extra timeout for XferFinish per MB (badge needs time to sync large files) */
+#define FINISH_TIMEOUT_PER_MB_MS 2000
+
+/* Maximum finish timeout for very large files */
+#define FINISH_TIMEOUT_MAX_MS 120000
+
 /*
  * Map BadgeLink status code to errno.
  */
@@ -552,17 +558,27 @@ int badgelink_fs_upload(struct badgelink_client *client, const char *path,
         }
 
         sent += chunk_size;
+
+        /* Small delay between chunks to avoid overwhelming the badge */
+        usleep(5000);  /* 5ms */
     }
 
     fprintf(stderr, "DEBUG fs_upload: all chunks sent, finishing\n");
 
-    /* Finish upload */
+    /* Finish upload - use dynamic timeout based on file size */
+    /* Badge needs time to sync large files to SD card */
+    int finish_timeout = XFER_TIMEOUT_MS + (size / (1024 * 1024)) * FINISH_TIMEOUT_PER_MB_MS;
+    if (finish_timeout > FINISH_TIMEOUT_MAX_MS)
+        finish_timeout = FINISH_TIMEOUT_MAX_MS;
+    fprintf(stderr, "DEBUG fs_upload: using finish timeout %dms for %zu byte file\n",
+            finish_timeout, size);
+
     badgelink_Request finish_req = badgelink_Request_init_zero;
     finish_req.which_req = badgelink_Request_xfer_ctrl_tag;
     finish_req.req.xfer_ctrl = badgelink_XferReq_XferFinish;
 
     ret = badgelink_proto_request(&client->proto, &finish_req, &resp,
-                                  TRANSFER_TIMEOUT_MS);
+                                  finish_timeout);
     if (ret < 0) {
         fprintf(stderr, "DEBUG fs_upload: finish failed: %d\n", ret);
         return ret;
@@ -574,6 +590,10 @@ int badgelink_fs_upload(struct badgelink_client *client, const char *path,
     }
 
     fprintf(stderr, "DEBUG fs_upload: upload complete\n");
+
+    /* Small delay after upload to let badge settle before next operation */
+    usleep(50000);  /* 50ms */
+
     return 0;
 }
 
@@ -918,18 +938,21 @@ int badgelink_appfs_upload(struct badgelink_client *client,
         sent += chunk_size;
     }
 
-    /* Finish upload */
+    /* Finish upload - use xfer_timeout like Python, badge needs time to write to storage */
     badgelink_Request finish_req = badgelink_Request_init_zero;
     finish_req.which_req = badgelink_Request_xfer_ctrl_tag;
     finish_req.req.xfer_ctrl = badgelink_XferReq_XferFinish;
 
     ret = badgelink_proto_request(&client->proto, &finish_req, &resp,
-                                  TRANSFER_TIMEOUT_MS);
+                                  XFER_TIMEOUT_MS);
     if (ret < 0)
         return ret;
 
     if (resp.status_code != badgelink_StatusCode_StatusOk)
         return badgelink_status_to_errno(resp.status_code);
+
+    /* Small delay after upload to let badge settle before next operation */
+    usleep(50000);  /* 50ms */
 
     return 0;
 }

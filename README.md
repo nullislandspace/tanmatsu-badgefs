@@ -13,9 +13,9 @@ make
 
 # Connect your Tanmatsu badge via USB
 
-# Mount (single-threaded foreground mode recommended)
+# Mount (foreground mode recommended)
 mkdir -p /tmp/badge
-./badgefs -f -s /tmp/badge
+./badgefs -f /tmp/badge
 
 # Access badge storage
 ls /tmp/badge/sd/          # SD card
@@ -23,7 +23,7 @@ ls /tmp/badge/int/         # Internal flash
 ls /tmp/badge/appfs/       # Installed applications
 
 # Unmount
-fusermount -u /tmp/badge
+./badgefs -u /tmp/badge
 ```
 
 ## Virtual Filesystem Structure
@@ -107,12 +107,16 @@ rmdir /tmp/badge/sd/mydir
 ./badgefs [options] <mountpoint>
 
 Options:
+  -u          Unmount the filesystem
   -f          Foreground mode (recommended)
-  -s          Single-threaded mode (recommended)
   -d          Debug mode (verbose output)
   -o <opts>   FUSE mount options
   -h          Show help
 ```
+
+Single-threaded mode is automatically enabled (USB communication is not thread-safe).
+
+The badge connection is validated before mounting - if the badge is not connected, badgefs will exit with an error instead of creating an unusable mount.
 
 ## Dependencies
 
@@ -131,14 +135,15 @@ sudo udevadm control --reload-rules
 # Reconnect badge
 ```
 
-**Mount hangs or times out:**
+**"Badge not connected" error:**
 - Ensure badge is connected and powered on
 - Try unplugging and reconnecting the USB cable
 - Check `dmesg` for USB errors
+- Verify USB permissions (see above)
 
 **Files not appearing:**
-- Use `-f -s` flags for single-threaded foreground mode
-- Check `/tmp/badgefs_debug.log` for errors
+- Use `-f` flag for foreground mode to see errors
+- Use `-d -f` for debug output
 
 ## Technical Details
 
