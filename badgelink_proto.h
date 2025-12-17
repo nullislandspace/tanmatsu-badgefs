@@ -27,6 +27,7 @@ struct badgelink_proto {
     uint8_t rx_buf[BADGELINK_RX_BUF_SIZE];
     size_t rx_len;          /* Bytes currently in rx_buf */
     size_t rx_pos;          /* Current read position in rx_buf */
+    bool sync_occurred;     /* Set when badge-initiated sync answered */
 };
 
 /*

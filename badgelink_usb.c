@@ -133,7 +133,6 @@ int badgelink_usb_write(struct badgelink_usb *usb, const uint8_t *data,
 
     size_t total_sent = 0;
 
-    fprintf(stderr, "DEBUG usb_write: sending %zu bytes\n", len);
     while (total_sent < len) {
         int transferred = 0;
         int ret = libusb_bulk_transfer(usb->handle, BADGELINK_EP_OUT,
@@ -153,7 +152,6 @@ int badgelink_usb_write(struct badgelink_usb *usb, const uint8_t *data,
         /* 10ms delay after each write like Python does */
         usleep(10000);
     }
-    fprintf(stderr, "DEBUG usb_write: sent %zu bytes total\n", total_sent);
 
     return total_sent;
 }

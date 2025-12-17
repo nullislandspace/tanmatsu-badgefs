@@ -28,4 +28,11 @@ struct badgefs_backend *badgefs_backend_badgelink_get(void);
  */
 int badgefs_backend_badgelink_test_connection(void);
 
+/*
+ * Force protocol version 1 (legacy mode).
+ * Must be called before badgefs_backend_badgelink_get() or init.
+ * When enabled, version negotiation is skipped and legacy V1 behavior is used.
+ */
+void badgefs_backend_badgelink_force_v1(void);
+
 #endif /* BADGEFS_BACKEND_BADGELINK_H */

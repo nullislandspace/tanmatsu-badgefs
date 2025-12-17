@@ -1,0 +1,121 @@
+@  changeset:   23:8f767f1b0db2
+|  tag:         tip
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Fri Dec 12 16:52:48 2025 +0100
+|  summary:     ALWAYS negotiate
+|
+o  changeset:   22:05f46143e698
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Fri Dec 12 13:50:19 2025 +0100
+|  summary:     Add Protocol V2 description
+|
+o  changeset:   21:9ea39eb17267
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Fri Dec 12 10:02:58 2025 +0100
+|  summary:     Show protocol version for every upload and download
+|
+o  changeset:   20:57e36453b822
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Fri Dec 12 09:58:35 2025 +0100
+|  summary:     Improve badgefs somewhat and start on protocol v2
+|
+o  changeset:   19:c8677860843c
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Thu Dec 11 14:02:06 2025 +0100
+|  summary:     Add mount/umount targets in Makefile
+|
+o  changeset:   18:8da73d0d23f1
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Thu Dec 11 09:01:32 2025 +0100
+|  summary:     Push current version to git
+|
+o  changeset:   17:4568939f5717
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Thu Nov 27 13:59:08 2025 +0100
+|  summary:     CLAUDE
+|
+o  changeset:   16:3d124af8cfb1
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Thu Nov 27 12:06:07 2025 +0100
+|  summary:     More faffing around with timeouts
+|
+o  changeset:   15:9e021788b4eb
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Thu Nov 27 09:10:14 2025 +0100
+|  summary:     Allow unmounting directly from the badgefs command
+|
+o  changeset:   14:b216e0f1e24e
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Wed Nov 26 15:13:22 2025 +0100
+|  summary:     Update CLAUDE.md
+|
+o  changeset:   13:1f99ae314b22
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Wed Nov 26 15:01:24 2025 +0100
+|  summary:     Remove memory-only backend, push ti github
+|
+o  changeset:   12:7f5146c260b3
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Wed Nov 26 14:50:56 2025 +0100
+|  summary:     Implement flush/fsync
+|
+o  changeset:   11:571b797dea99
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Wed Nov 26 14:43:27 2025 +0100
+|  summary:     Make sure badge is connected an in USB mode before creating the mountpoint
+|
+o  changeset:   10:88e62adf9e44
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Wed Nov 26 14:35:43 2025 +0100
+|  summary:     Git initial commit
+|
+o  changeset:   9:9e5ce3da71ff
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Wed Nov 26 14:33:41 2025 +0100
+|  summary:     CLeanup
+|
+o  changeset:   8:ae58309ab053
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Wed Nov 26 14:32:41 2025 +0100
+|  summary:     Init git
+|
+o  changeset:   7:6676ce413744
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Wed Nov 26 14:29:54 2025 +0100
+|  summary:     Add .gitignore
+|
+o  changeset:   6:dc5aaf853e4a
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Wed Nov 26 14:28:41 2025 +0100
+|  summary:     Fix appfs
+|
+o  changeset:   5:6ce6087738f2
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Wed Nov 26 13:24:40 2025 +0100
+|  summary:     Appfs download
+|
+o  changeset:   4:7fe921e527d7
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Wed Nov 26 12:55:51 2025 +0100
+|  summary:     Fix handling of larger files
+|
+o  changeset:   3:42cf0cfb8c1b
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Wed Nov 26 12:42:05 2025 +0100
+|  summary:     More tests
+|
+o  changeset:   2:5b4eec3806cc
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Wed Nov 26 12:30:14 2025 +0100
+|  summary:     sd card download works?
+|
+o  changeset:   1:32f089abeba0
+|  user:        Rene Schickbauer <cavac@palebluedot>
+|  date:        Wed Nov 26 11:23:37 2025 +0100
+|  summary:     Working upload to sd card?
+|
+o  changeset:   0:e0ceaafa5f36
+   user:        Rene Schickbauer <cavac@venera>
+   date:        Wed Nov 26 09:10:35 2025 +0100
+   summary:     Initial checkin
+

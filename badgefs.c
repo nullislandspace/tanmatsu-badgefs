@@ -49,6 +49,7 @@ static void print_usage(const char *progname)
         "  -d              Enable debug output (implies -f)\n"
         "  -s              Run single-threaded\n"
         "  -o <options>    Mount options (comma-separated)\n"
+        "  --version1      Force protocol version 1 (legacy mode)\n"
         "  -h, --help      Show this help message\n"
         "  -V, --version   Show version\n"
         "\n"
@@ -102,6 +103,7 @@ static int do_unmount(const char *mountpoint)
 int main(int argc, char *argv[])
 {
     int do_unmount_flag = 0;
+    int force_v1_flag = 0;
     const char *mountpoint = NULL;
     int new_argc = 0;
     char **new_argv = malloc((argc + 2) * sizeof(char *));  /* +2 for -s flag */
@@ -133,6 +135,10 @@ int main(int argc, char *argv[])
             do_unmount_flag = 1;
             continue;  /* Don't pass -u to FUSE */
         }
+        if (strcmp(argv[i], "--version1") == 0) {
+            force_v1_flag = 1;
+            continue;  /* Don't pass --version1 to FUSE */
+        }
         new_argv[new_argc++] = argv[i];
         /* Track mountpoint (last non-option argument) */
         if (argv[i][0] != '-') {
@@ -156,6 +162,12 @@ int main(int argc, char *argv[])
         print_usage(argv[0]);
         free(new_argv);
         return 1;
+    }
+
+    /* Apply force_v1 flag if set */
+    if (force_v1_flag) {
+        printf("BadgeFS: Forcing protocol version 1 (legacy mode)\n");
+        badgefs_backend_badgelink_force_v1();
     }
 
     /* Test connection before mounting to avoid invalid mount */

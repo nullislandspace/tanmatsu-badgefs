@@ -55,6 +55,7 @@ static struct {
     pthread_mutex_t lock;
     struct open_file *open_files;
     bool initialized;
+    bool force_v1;  /* Force protocol version 1 (set before init) */
 } state;
 
 /* ============================================================================
@@ -251,6 +252,11 @@ static int bl_init(void *config)
         return ret;
     }
 
+    /* Apply force_v1 flag if set (before connect) */
+    if (state.force_v1) {
+        badgelink_client_force_v1(&state.client);
+    }
+
     ret = badgelink_client_connect(&state.client);
     if (ret < 0) {
         fprintf(stderr, "badgefs_badgelink: failed to connect: %s\n",
@@ -260,7 +266,8 @@ static int bl_init(void *config)
     }
 
     state.initialized = true;
-    printf("badgefs_badgelink: connected to badge\n");
+    printf("badgefs_badgelink: connected to badge (protocol v%u)\n",
+           badgelink_client_get_protocol_version(&state.client));
     return 0;
 }
 
@@ -294,8 +301,6 @@ static int bl_lookup(const char *path, struct stat *st)
 {
     memset(st, 0, sizeof(*st));
 
-    fprintf(stderr, "DEBUG bl_lookup: path=%s\n", path);
-
     enum path_type type = get_path_type(path);
 
     switch (type) {
@@ -327,7 +332,6 @@ static int bl_lookup(const char *path, struct stat *st)
                 st->st_atime = time(NULL);
                 st->st_uid = getuid();
                 st->st_gid = getgid();
-                fprintf(stderr, "DEBUG bl_lookup: returning open_file info (modified), size=%zu\n", f->size);
                 pthread_mutex_unlock(&state.lock);
                 return 0;
             }
@@ -380,7 +384,6 @@ static int bl_lookup(const char *path, struct stat *st)
                 st->st_atime = time(NULL);
                 st->st_uid = getuid();
                 st->st_gid = getgid();
-                fprintf(stderr, "DEBUG bl_lookup: appfs returning open_file info (modified), size=%zu\n", f->size);
                 pthread_mutex_unlock(&state.lock);
                 return 0;
             }
@@ -532,14 +535,11 @@ static int bl_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 
     enum path_type type = get_path_type(path);
 
-    fprintf(stderr, "DEBUG bl_create: path=%s\n", path);
-
     pthread_mutex_lock(&state.lock);
 
     /* Check if already open */
     struct open_file *f = find_open_file(path);
     if (f) {
-        fprintf(stderr, "DEBUG bl_create: file already open\n");
         pthread_mutex_unlock(&state.lock);
         return -EEXIST;
     }
@@ -555,7 +555,6 @@ static int bl_create(const char *path, mode_t mode, struct fuse_file_info *fi)
             return -ENOMEM;
         }
         f->modified = true;  /* New file, will need upload */
-        fprintf(stderr, "DEBUG bl_create: created open_file entry, modified=%d\n", f->modified);
         pthread_mutex_unlock(&state.lock);
         return 0;
 
@@ -602,8 +601,6 @@ static int bl_open(const char *path, struct fuse_file_info *fi)
 {
     enum path_type type = get_path_type(path);
 
-    fprintf(stderr, "DEBUG bl_open: path=%s flags=0x%x\n", path, fi->flags);
-
     if (type == PATH_ROOT || type == PATH_INVALID)
         return -ENOENT;
 
@@ -612,7 +609,6 @@ static int bl_open(const char *path, struct fuse_file_info *fi)
     /* Check if already open */
     struct open_file *f = find_open_file(path);
     if (!f) {
-        fprintf(stderr, "DEBUG bl_open: file not in open list, creating new entry\n");
         /* Create new open file entry */
         f = create_open_file(path);
         if (!f) {
@@ -622,12 +618,10 @@ static int bl_open(const char *path, struct fuse_file_info *fi)
 
         /* Check for O_TRUNC - if set, skip download and start with empty buffer */
         if (fi->flags & O_TRUNC) {
-            fprintf(stderr, "DEBUG bl_open: O_TRUNC set, starting with empty buffer\n");
             f->modified = true;  /* Will need upload on close */
         } else {
             /* Download existing content (for both read and write) */
             /* This caches the file to avoid repeated downloads during read */
-            fprintf(stderr, "DEBUG bl_open: downloading existing content\n");
             uint8_t *data = NULL;
             size_t size = 0;
             int ret = 0;
@@ -641,8 +635,6 @@ static int bl_open(const char *path, struct fuse_file_info *fi)
                                             &data, &size);
             }
 
-            fprintf(stderr, "DEBUG bl_open: download returned %d, size=%zu\n", ret, size);
-
             if (ret < 0 && ret != -ENOENT) {
                 remove_open_file(f);
                 pthread_mutex_unlock(&state.lock);
@@ -653,12 +645,8 @@ static int bl_open(const char *path, struct fuse_file_info *fi)
                 f->buffer = data;
                 f->size = size;
                 f->capacity = size;
-                fprintf(stderr, "DEBUG bl_open: loaded existing content size=%zu\n", size);
             }
         }
-    } else {
-        fprintf(stderr, "DEBUG bl_open: file already in open list, size=%zu modified=%d\n",
-                f->size, f->modified);
     }
 
     pthread_mutex_unlock(&state.lock);
@@ -721,8 +709,6 @@ static int bl_fsync(const char *path, int datasync, struct fuse_file_info *fi)
     (void)datasync;
     (void)fi;
 
-    fprintf(stderr, "DEBUG bl_fsync: path=%s\n", path);
-
     pthread_mutex_lock(&state.lock);
 
     struct open_file *f = find_open_file(path);
@@ -744,8 +730,6 @@ static int bl_fsync(const char *path, int datasync, struct fuse_file_info *fi)
 static int bl_flush(const char *path, struct fuse_file_info *fi)
 {
     (void)fi;
-
-    fprintf(stderr, "DEBUG bl_flush: path=%s\n", path);
 
     pthread_mutex_lock(&state.lock);
 
@@ -769,19 +753,13 @@ static int bl_release(const char *path, struct fuse_file_info *fi)
 {
     (void)fi;
 
-    fprintf(stderr, "DEBUG bl_release: path=%s\n", path);
-
     pthread_mutex_lock(&state.lock);
 
     struct open_file *f = find_open_file(path);
     if (!f) {
-        fprintf(stderr, "DEBUG bl_release: file not found in open_files list\n");
         pthread_mutex_unlock(&state.lock);
         return 0;
     }
-
-    fprintf(stderr, "DEBUG bl_release: found file, modified=%d size=%zu buffer=%p\n",
-            f->modified, f->size, (void*)f->buffer);
 
     /* If modified, upload to device */
     if (f->modified) {
@@ -800,49 +778,38 @@ static int bl_release(const char *path, struct fuse_file_info *fi)
                 /* App exists - keep existing title/version */
                 strncpy(app.title, existing.title, sizeof(app.title) - 1);
                 app.version = existing.version;
-                fprintf(stderr, "DEBUG bl_release: keeping existing title='%s' version=%d\n",
-                        app.title, app.version);
             } else {
                 /* New app - use defaults */
                 strncpy(app.title, "Application", sizeof(app.title) - 1);
                 app.version = 0;
-                fprintf(stderr, "DEBUG bl_release: new app, using defaults title='Application' version=0\n");
             }
 
             /* Override with pending xattr if set */
             if (f->has_pending_title) {
                 strncpy(app.title, f->pending_title, sizeof(app.title) - 1);
-                fprintf(stderr, "DEBUG bl_release: using pending title='%s'\n", app.title);
             }
             if (f->has_pending_version) {
                 app.version = f->pending_version;
-                fprintf(stderr, "DEBUG bl_release: using pending version=%d\n", app.version);
             }
 
             app.size = f->size;
 
-            fprintf(stderr, "DEBUG bl_release: uploading appfs %s size=%zu\n", f->slug, f->size);
             ret = badgelink_appfs_upload(&state.client, &app,
                                          f->buffer, f->size);
         } else {
             const char *device_path = translate_path(path);
-            fprintf(stderr, "DEBUG bl_release: uploading fs %s size=%zu\n", device_path, f->size);
             ret = badgelink_fs_upload(&state.client, device_path,
                                       f->buffer, f->size);
         }
 
         if (ret < 0) {
-            fprintf(stderr, "badgefs_badgelink: upload failed for %s: %s\n",
+            fprintf(stderr, "badgefs: upload failed for %s: %s\n",
                     path, strerror(-ret));
             /* Still need to clean up the open file entry */
             remove_open_file(f);
             pthread_mutex_unlock(&state.lock);
             return ret;
-        } else {
-            fprintf(stderr, "DEBUG bl_release: upload succeeded\n");
         }
-    } else {
-        fprintf(stderr, "DEBUG bl_release: not modified, skipping upload\n");
     }
 
     remove_open_file(f);
@@ -929,30 +896,21 @@ static int bl_write(const char *path, const char *buf, size_t size, off_t offset
     if (type == PATH_ROOT || type == PATH_INVALID)
         return -ENOENT;
 
-    fprintf(stderr, "DEBUG bl_write: path=%s size=%zu offset=%ld\n", path, size, (long)offset);
-
     pthread_mutex_lock(&state.lock);
 
     struct open_file *f = find_open_file(path);
     if (!f) {
-        fprintf(stderr, "DEBUG bl_write: ERROR - file not open!\n");
         pthread_mutex_unlock(&state.lock);
         return -EBADF;
     }
-
-    fprintf(stderr, "DEBUG bl_write: found open_file, current size=%zu capacity=%zu\n",
-            f->size, f->capacity);
 
     /* Ensure buffer has enough space */
     size_t needed = offset + size;
     int ret = ensure_buffer(f, needed);
     if (ret < 0) {
-        fprintf(stderr, "DEBUG bl_write: ensure_buffer failed: %d\n", ret);
         pthread_mutex_unlock(&state.lock);
         return ret;
     }
-
-    fprintf(stderr, "DEBUG bl_write: after ensure_buffer capacity=%zu\n", f->capacity);
 
     /* Zero-fill gap if writing past end */
     if ((size_t)offset > f->size) {
@@ -968,8 +926,6 @@ static int bl_write(const char *path, const char *buf, size_t size, off_t offset
 
     f->modified = true;
 
-    fprintf(stderr, "DEBUG bl_write: after write size=%zu, returning %zu\n", f->size, size);
-
     pthread_mutex_unlock(&state.lock);
     return size;
 }
@@ -977,8 +933,6 @@ static int bl_write(const char *path, const char *buf, size_t size, off_t offset
 static int bl_truncate(const char *path, off_t size, struct fuse_file_info *fi)
 {
     (void)fi;
-
-    fprintf(stderr, "DEBUG bl_truncate: path=%s size=%ld\n", path, (long)size);
 
     enum path_type type = get_path_type(path);
 
@@ -1174,7 +1128,6 @@ static int bl_setxattr(const char *path, const char *name, const char *value,
         }
 
         /* Download existing content so we don't lose it when uploading with new xattr */
-        fprintf(stderr, "DEBUG bl_setxattr: downloading existing content for %s\n", f->slug);
         uint8_t *data = NULL;
         size_t file_size = 0;
         int ret = badgelink_appfs_download(&state.client, f->slug, &data, &file_size);
@@ -1182,7 +1135,6 @@ static int bl_setxattr(const char *path, const char *name, const char *value,
             f->buffer = data;
             f->size = file_size;
             f->capacity = file_size;
-            fprintf(stderr, "DEBUG bl_setxattr: loaded existing content size=%zu\n", file_size);
         } else if (ret != -ENOENT) {
             /* Download failed (not just file-not-found) */
             remove_open_file(f);
@@ -1200,7 +1152,6 @@ static int bl_setxattr(const char *path, const char *name, const char *value,
         memcpy(f->pending_title, value, size);
         f->pending_title[size] = '\0';
         f->has_pending_title = true;
-        fprintf(stderr, "DEBUG bl_setxattr: set pending title='%s'\n", f->pending_title);
     } else if (strcmp(name, XATTR_APPFS_VERSION) == 0) {
         /* Parse integer from value */
         char ver_str[16];
@@ -1212,7 +1163,6 @@ static int bl_setxattr(const char *path, const char *name, const char *value,
         ver_str[size] = '\0';
         f->pending_version = atoi(ver_str);
         f->has_pending_version = true;
-        fprintf(stderr, "DEBUG bl_setxattr: set pending version=%d\n", f->pending_version);
     } else {
         pthread_mutex_unlock(&state.lock);
         return -ENOTSUP;
@@ -1243,16 +1193,13 @@ static int bl_setxattr(const char *path, const char *name, const char *value,
     }
     app.size = f->size;
 
-    fprintf(stderr, "DEBUG bl_setxattr: uploading appfs %s size=%zu title='%s' version=%d\n",
-            f->slug, f->size, app.title, app.version);
     int ret = badgelink_appfs_upload(&state.client, &app, f->buffer, f->size);
     if (ret < 0) {
-        fprintf(stderr, "badgefs_badgelink: setxattr upload failed for %s: %s\n",
+        fprintf(stderr, "badgefs: setxattr upload failed for %s: %s\n",
                 path, strerror(-ret));
         pthread_mutex_unlock(&state.lock);
         return ret;
     }
-    fprintf(stderr, "DEBUG bl_setxattr: upload succeeded\n");
 
     /* Clean up the open_file entry */
     remove_open_file(f);
@@ -1312,6 +1259,15 @@ int badgefs_backend_badgelink_test_connection(void)
     badgelink_client_cleanup(&test_client);
 
     return 0;
+}
+
+/*
+ * Force protocol version 1 (legacy mode).
+ * Must be called before init.
+ */
+void badgefs_backend_badgelink_force_v1(void)
+{
+    state.force_v1 = true;
 }
 
 /* ============================================================================

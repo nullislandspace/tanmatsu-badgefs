@@ -70,9 +70,69 @@ int badgelink_client_init(struct badgelink_client *client)
 
     memset(client, 0, sizeof(*client));
 
+    /* Default to V1 until version negotiation completes */
+    client->protocol_version = BADGELINK_PROTOCOL_V1;
+    client->force_v1 = false;
+
     int ret = badgelink_proto_init(&client->proto);
     if (ret < 0)
         return ret;
+
+    return 0;
+}
+
+/*
+ * Negotiate protocol version with badge.
+ * Called after sync. Server resets to v1 on every sync, so this must be
+ * called every time sync occurs.
+ *
+ * Returns 0 on success (protocol_version is set).
+ * On failure, falls back to v1.
+ */
+static int negotiate_protocol_version(struct badgelink_client *client)
+{
+    /* If force_v1 is set, skip negotiation */
+    if (client->force_v1) {
+        client->protocol_version = BADGELINK_PROTOCOL_V1;
+        return 0;
+    }
+
+    /* Send VersionReq with our highest supported version */
+    badgelink_Request req = badgelink_Request_init_zero;
+    req.which_req = badgelink_Request_version_req_tag;
+    req.req.version_req.client_version = BADGELINK_CLIENT_VERSION;
+
+    badgelink_Response resp;
+    int ret = badgelink_proto_request(&client->proto, &req, &resp,
+                                      CLIENT_TIMEOUT_MS);
+    if (ret < 0) {
+        /* Timeout or error - fall back to v1 */
+        client->protocol_version = BADGELINK_PROTOCOL_V1;
+        return 0;
+    }
+
+    /* Check if server supports version negotiation */
+    if (resp.status_code == badgelink_StatusCode_StatusNotSupported) {
+        /* Server is v1 only */
+        client->protocol_version = BADGELINK_PROTOCOL_V1;
+        return 0;
+    }
+
+    if (resp.status_code != badgelink_StatusCode_StatusOk) {
+        /* Unexpected status - fall back to v1 */
+        client->protocol_version = BADGELINK_PROTOCOL_V1;
+        return 0;
+    }
+
+    /* Check response type */
+    if (resp.which_resp != badgelink_Response_version_resp_tag) {
+        /* Unexpected response type - fall back to v1 */
+        client->protocol_version = BADGELINK_PROTOCOL_V1;
+        return 0;
+    }
+
+    /* Use negotiated version */
+    client->protocol_version = resp.resp.version_resp.negotiated_version;
 
     return 0;
 }
@@ -103,6 +163,10 @@ int badgelink_client_connect(struct badgelink_client *client)
     }
 
     client->synced = true;
+
+    /* Negotiate protocol version after sync */
+    negotiate_protocol_version(client);
+
     return 0;
 }
 
@@ -135,6 +199,27 @@ void badgelink_client_cleanup(struct badgelink_client *client)
 bool badgelink_client_is_connected(struct badgelink_client *client)
 {
     return client && client->connected && client->synced;
+}
+
+/*
+ * Get negotiated protocol version.
+ */
+uint32_t badgelink_client_get_protocol_version(struct badgelink_client *client)
+{
+    if (!client)
+        return BADGELINK_PROTOCOL_V1;
+    return client->protocol_version;
+}
+
+/*
+ * Force protocol version 1 (call before connect).
+ */
+void badgelink_client_force_v1(struct badgelink_client *client)
+{
+    if (client) {
+        client->force_v1 = true;
+        client->protocol_version = BADGELINK_PROTOCOL_V1;
+    }
 }
 
 /* ============================================================================
@@ -369,10 +454,11 @@ int badgelink_fs_download(struct badgelink_client *client, const char *path,
     if (!client->connected)
         return -ENODEV;
 
+    /* Always negotiate protocol version before transfer */
+    negotiate_protocol_version(client);
+
     *data = NULL;
     *size = 0;
-
-    fprintf(stderr, "DEBUG fs_download: path=%s\n", path);
 
     /* Start download */
     badgelink_Request req = badgelink_Request_init_zero;
@@ -383,19 +469,24 @@ int badgelink_fs_download(struct badgelink_client *client, const char *path,
     badgelink_Response resp;
     int ret = badgelink_proto_request(&client->proto, &req, &resp,
                                       XFER_TIMEOUT_MS);
-    if (ret < 0) {
-        fprintf(stderr, "DEBUG fs_download: initial request failed: %d\n", ret);
+    if (ret < 0)
         return ret;
-    }
 
-    if (resp.status_code != badgelink_StatusCode_StatusOk) {
-        fprintf(stderr, "DEBUG fs_download: status=%d\n", resp.status_code);
+    if (resp.status_code != badgelink_StatusCode_StatusOk)
         return badgelink_status_to_errno(resp.status_code);
+
+    /* Get file size and CRC from response
+     * V1: crc32 is the actual CRC (server read entire file)
+     * V2: crc32 is 0 (server used stat, will send CRC at XferFinish)
+     */
+    uint32_t file_size = resp.resp.fs_resp.size;
+    uint32_t initial_crc = 0;
+    if (resp.resp.fs_resp.which_val == badgelink_FsActionResp_crc32_tag) {
+        initial_crc = resp.resp.fs_resp.val.crc32;
     }
 
-    /* Get file size from response */
-    uint32_t file_size = resp.resp.fs_resp.size;
-    fprintf(stderr, "DEBUG fs_download: file_size=%u\n", file_size);
+    fprintf(stderr, "fs_download: %s (%u bytes, v%u)\n", path, file_size,
+            client->protocol_version);
 
     if (file_size == 0) {
         *data = malloc(1);  /* Empty file */
@@ -411,12 +502,11 @@ int badgelink_fs_download(struct badgelink_client *client, const char *path,
         return -ENOMEM;
 
     uint32_t received = 0;
+    uint32_t running_crc = 0xFFFFFFFF;  /* Initialize for streaming CRC */
 
     /* Receive chunks */
     while (received < file_size) {
-        fprintf(stderr, "DEBUG fs_download: chunk received=%u/%u\n", received, file_size);
-
-        /* Request next chunk - no delay needed, badge handles pacing */
+        /* Request next chunk */
         badgelink_Request cont_req = badgelink_Request_init_zero;
         cont_req.which_req = badgelink_Request_xfer_ctrl_tag;
         cont_req.req.xfer_ctrl = badgelink_XferReq_XferContinue;
@@ -425,10 +515,13 @@ int badgelink_fs_download(struct badgelink_client *client, const char *path,
         ret = badgelink_proto_request(&client->proto, &cont_req, &chunk_resp,
                                       TRANSFER_TIMEOUT_MS);
         if (ret < 0) {
-            fprintf(stderr, "DEBUG fs_download: chunk request failed: %d\n", ret);
+            fprintf(stderr, "fs_download: %s failed at %u/%u bytes\n",
+                    path, received, file_size);
             free(buffer);
             /* Drain any stale USB data before cleanup */
             badgelink_proto_resync(&client->proto);
+            /* Re-negotiate protocol version after resync (badge resets to v1) */
+            negotiate_protocol_version(client);
             /* Send XferFinish to clean up state */
             badgelink_Request finish_req = badgelink_Request_init_zero;
             finish_req.which_req = badgelink_Request_xfer_ctrl_tag;
@@ -438,14 +531,12 @@ int badgelink_fs_download(struct badgelink_client *client, const char *path,
         }
 
         if (chunk_resp.status_code != badgelink_StatusCode_StatusOk) {
-            fprintf(stderr, "DEBUG fs_download: chunk status=%d\n", chunk_resp.status_code);
             free(buffer);
             return badgelink_status_to_errno(chunk_resp.status_code);
         }
 
         /* Check response type */
         if (chunk_resp.which_resp != badgelink_Response_download_chunk_tag) {
-            fprintf(stderr, "DEBUG fs_download: unexpected response type=%d\n", chunk_resp.which_resp);
             free(buffer);
             return -EINVAL;
         }
@@ -454,8 +545,7 @@ int badgelink_fs_download(struct badgelink_client *client, const char *path,
 
         /* Verify chunk position */
         if (chunk->position != received) {
-            fprintf(stderr, "badgelink_client: chunk position mismatch: "
-                    "expected %u got %u\n", received, chunk->position);
+            fprintf(stderr, "fs_download: %s chunk position mismatch\n", path);
             free(buffer);
             return -EIO;
         }
@@ -466,20 +556,52 @@ int badgelink_fs_download(struct badgelink_client *client, const char *path,
             chunk_size = file_size - received;
 
         memcpy(buffer + received, chunk->data.bytes, chunk_size);
+
+        /* Update running CRC */
+        running_crc = badgelink_crc32_update(running_crc, chunk->data.bytes, chunk_size);
+
         received += chunk_size;
     }
 
-    fprintf(stderr, "DEBUG fs_download: transfer complete, sending XferFinish\n");
+    /* Finalize running CRC */
+    running_crc = badgelink_crc32_final(running_crc);
 
-    /* Send XferFinish to complete transfer (like Python does) */
+    /* Send XferFinish to complete transfer */
     badgelink_Request finish_req = badgelink_Request_init_zero;
     finish_req.which_req = badgelink_Request_xfer_ctrl_tag;
     finish_req.req.xfer_ctrl = badgelink_XferReq_XferFinish;
     ret = badgelink_proto_request(&client->proto, &finish_req, &resp, CLIENT_TIMEOUT_MS);
-    if (ret < 0) {
-        fprintf(stderr, "DEBUG fs_download: XferFinish failed: %d\n", ret);
-        /* Don't fail the download if we already got all data */
+
+    /* Get expected CRC based on protocol version */
+    uint32_t expected_crc;
+    if (client->protocol_version >= BADGELINK_PROTOCOL_V2) {
+        /* V2: XferFinish returns FsActionResp with crc32 */
+        if (ret < 0) {
+            fprintf(stderr, "fs_download: %s finish failed\n", path);
+            free(buffer);
+            return ret;
+        }
+        if (resp.which_resp == badgelink_Response_fs_resp_tag &&
+            resp.resp.fs_resp.which_val == badgelink_FsActionResp_crc32_tag) {
+            expected_crc = resp.resp.fs_resp.val.crc32;
+        } else {
+            fprintf(stderr, "fs_download: %s unexpected finish response\n", path);
+            free(buffer);
+            return -EIO;
+        }
+    } else {
+        /* V1: XferFinish returns StatusOk, use CRC from initial response */
+        expected_crc = initial_crc;
     }
+
+    /* Verify CRC */
+    if (running_crc != expected_crc) {
+        fprintf(stderr, "fs_download: %s CRC mismatch\n", path);
+        free(buffer);
+        return -EIO;
+    }
+
+    fprintf(stderr, "fs_download: %s complete\n", path);
 
     *data = buffer;
     *size = file_size;
@@ -498,11 +620,14 @@ int badgelink_fs_upload(struct badgelink_client *client, const char *path,
     if (!client->connected)
         return -ENODEV;
 
-    fprintf(stderr, "DEBUG fs_upload: path=%s size=%zu\n", path, size);
+    /* Always negotiate protocol version before transfer */
+    negotiate_protocol_version(client);
+
+    fprintf(stderr, "fs_upload: %s (%zu bytes, v%u)\n", path, size,
+            client->protocol_version);
 
     /* Calculate CRC32 of file */
     uint32_t crc = badgelink_crc32(data, size);
-    fprintf(stderr, "DEBUG fs_upload: CRC32=0x%08x\n", crc);
 
     /* Start upload */
     badgelink_Request req = badgelink_Request_init_zero;
@@ -512,31 +637,21 @@ int badgelink_fs_upload(struct badgelink_client *client, const char *path,
     req.req.fs_action.size = size;
     req.req.fs_action.crc32 = crc;
 
-    fprintf(stderr, "DEBUG fs_upload: sending upload request\n");
     badgelink_Response resp;
     int ret = badgelink_proto_request(&client->proto, &req, &resp,
                                       XFER_TIMEOUT_MS);
-    if (ret < 0) {
-        fprintf(stderr, "DEBUG fs_upload: upload request failed: %d\n", ret);
+    if (ret < 0)
         return ret;
-    }
 
-    if (resp.status_code != badgelink_StatusCode_StatusOk) {
-        fprintf(stderr, "DEBUG fs_upload: upload request status: %d\n", resp.status_code);
+    if (resp.status_code != badgelink_StatusCode_StatusOk)
         return badgelink_status_to_errno(resp.status_code);
-    }
-    fprintf(stderr, "DEBUG fs_upload: upload request accepted\n");
 
     /* Send chunks */
     uint32_t sent = 0;
-    int chunk_num = 0;
     while (sent < size) {
         size_t chunk_size = size - sent;
         if (chunk_size > BADGELINK_CHUNK_MAX)
             chunk_size = BADGELINK_CHUNK_MAX;
-
-        fprintf(stderr, "DEBUG fs_upload: sending chunk %d, pos=%u size=%zu\n",
-                chunk_num++, sent, chunk_size);
 
         badgelink_Request chunk_req = badgelink_Request_init_zero;
         chunk_req.which_req = badgelink_Request_upload_chunk_tag;
@@ -548,14 +663,13 @@ int badgelink_fs_upload(struct badgelink_client *client, const char *path,
         ret = badgelink_proto_request(&client->proto, &chunk_req, &chunk_resp,
                                       TRANSFER_TIMEOUT_MS);
         if (ret < 0) {
-            fprintf(stderr, "DEBUG fs_upload: chunk failed: %d\n", ret);
+            fprintf(stderr, "fs_upload: %s failed at %u/%zu bytes\n",
+                    path, sent, size);
             return ret;
         }
 
-        if (chunk_resp.status_code != badgelink_StatusCode_StatusOk) {
-            fprintf(stderr, "DEBUG fs_upload: chunk status: %d\n", chunk_resp.status_code);
+        if (chunk_resp.status_code != badgelink_StatusCode_StatusOk)
             return badgelink_status_to_errno(chunk_resp.status_code);
-        }
 
         sent += chunk_size;
 
@@ -563,15 +677,11 @@ int badgelink_fs_upload(struct badgelink_client *client, const char *path,
         usleep(5000);  /* 5ms */
     }
 
-    fprintf(stderr, "DEBUG fs_upload: all chunks sent, finishing\n");
-
     /* Finish upload - use dynamic timeout based on file size */
     /* Badge needs time to sync large files to SD card */
     int finish_timeout = XFER_TIMEOUT_MS + (size / (1024 * 1024)) * FINISH_TIMEOUT_PER_MB_MS;
     if (finish_timeout > FINISH_TIMEOUT_MAX_MS)
         finish_timeout = FINISH_TIMEOUT_MAX_MS;
-    fprintf(stderr, "DEBUG fs_upload: using finish timeout %dms for %zu byte file\n",
-            finish_timeout, size);
 
     badgelink_Request finish_req = badgelink_Request_init_zero;
     finish_req.which_req = badgelink_Request_xfer_ctrl_tag;
@@ -580,16 +690,14 @@ int badgelink_fs_upload(struct badgelink_client *client, const char *path,
     ret = badgelink_proto_request(&client->proto, &finish_req, &resp,
                                   finish_timeout);
     if (ret < 0) {
-        fprintf(stderr, "DEBUG fs_upload: finish failed: %d\n", ret);
+        fprintf(stderr, "fs_upload: %s finish failed\n", path);
         return ret;
     }
 
-    if (resp.status_code != badgelink_StatusCode_StatusOk) {
-        fprintf(stderr, "DEBUG fs_upload: finish status: %d\n", resp.status_code);
+    if (resp.status_code != badgelink_StatusCode_StatusOk)
         return badgelink_status_to_errno(resp.status_code);
-    }
 
-    fprintf(stderr, "DEBUG fs_upload: upload complete\n");
+    fprintf(stderr, "fs_upload: %s complete\n", path);
 
     /* Small delay after upload to let badge settle before next operation */
     usleep(50000);  /* 50ms */
@@ -787,6 +895,9 @@ int badgelink_appfs_download(struct badgelink_client *client, const char *slug,
     if (!client->connected)
         return -ENODEV;
 
+    /* Always negotiate protocol version before transfer */
+    negotiate_protocol_version(client);
+
     *data = NULL;
     *size = 0;
 
@@ -807,8 +918,19 @@ int badgelink_appfs_download(struct badgelink_client *client, const char *slug,
     if (resp.status_code != badgelink_StatusCode_StatusOk)
         return badgelink_status_to_errno(resp.status_code);
 
-    /* Get app size from response */
+    /* Get app size and CRC from response
+     * V1: crc32 is the actual CRC (server read entire file)
+     * V2: crc32 is 0 (server used stat, will send CRC at XferFinish)
+     */
     uint32_t app_size = resp.resp.appfs_resp.size;
+    uint32_t initial_crc = 0;
+    if (resp.resp.appfs_resp.which_val == badgelink_AppfsActionResp_crc32_tag) {
+        initial_crc = resp.resp.appfs_resp.val.crc32;
+    }
+
+    fprintf(stderr, "appfs_download: %s (%u bytes, v%u)\n", slug, app_size,
+            client->protocol_version);
+
     if (app_size == 0) {
         *data = malloc(1);
         if (!*data)
@@ -823,6 +945,7 @@ int badgelink_appfs_download(struct badgelink_client *client, const char *slug,
         return -ENOMEM;
 
     uint32_t received = 0;
+    uint32_t running_crc = 0xFFFFFFFF;  /* Initialize for streaming CRC */
 
     /* Receive chunks */
     while (received < app_size) {
@@ -834,6 +957,8 @@ int badgelink_appfs_download(struct badgelink_client *client, const char *slug,
         ret = badgelink_proto_request(&client->proto, &cont_req, &chunk_resp,
                                       TRANSFER_TIMEOUT_MS);
         if (ret < 0) {
+            fprintf(stderr, "appfs_download: %s failed at %u/%u bytes\n",
+                    slug, received, app_size);
             free(buffer);
             return ret;
         }
@@ -851,7 +976,7 @@ int badgelink_appfs_download(struct badgelink_client *client, const char *slug,
         badgelink_Chunk *chunk = &chunk_resp.resp.download_chunk;
 
         if (chunk->position != received) {
-            fprintf(stderr, "badgelink_client: chunk position mismatch\n");
+            fprintf(stderr, "appfs_download: %s chunk position mismatch\n", slug);
             free(buffer);
             return -EIO;
         }
@@ -861,14 +986,52 @@ int badgelink_appfs_download(struct badgelink_client *client, const char *slug,
             chunk_size = app_size - received;
 
         memcpy(buffer + received, chunk->data.bytes, chunk_size);
+
+        /* Update running CRC */
+        running_crc = badgelink_crc32_update(running_crc, chunk->data.bytes, chunk_size);
+
         received += chunk_size;
     }
+
+    /* Finalize running CRC */
+    running_crc = badgelink_crc32_final(running_crc);
 
     /* Send XferFinish to properly terminate transfer */
     badgelink_Request finish_req = badgelink_Request_init_zero;
     finish_req.which_req = badgelink_Request_xfer_ctrl_tag;
     finish_req.req.xfer_ctrl = badgelink_XferReq_XferFinish;
-    badgelink_proto_request(&client->proto, &finish_req, &resp, CLIENT_TIMEOUT_MS);
+    ret = badgelink_proto_request(&client->proto, &finish_req, &resp, CLIENT_TIMEOUT_MS);
+
+    /* Get expected CRC based on protocol version */
+    uint32_t expected_crc;
+    if (client->protocol_version >= BADGELINK_PROTOCOL_V2) {
+        /* V2: XferFinish returns AppfsActionResp with crc32 */
+        if (ret < 0) {
+            fprintf(stderr, "appfs_download: %s finish failed\n", slug);
+            free(buffer);
+            return ret;
+        }
+        if (resp.which_resp == badgelink_Response_appfs_resp_tag &&
+            resp.resp.appfs_resp.which_val == badgelink_AppfsActionResp_crc32_tag) {
+            expected_crc = resp.resp.appfs_resp.val.crc32;
+        } else {
+            fprintf(stderr, "appfs_download: %s unexpected finish response\n", slug);
+            free(buffer);
+            return -EIO;
+        }
+    } else {
+        /* V1: XferFinish returns StatusOk, use CRC from initial response */
+        expected_crc = initial_crc;
+    }
+
+    /* Verify CRC */
+    if (running_crc != expected_crc) {
+        fprintf(stderr, "appfs_download: %s CRC mismatch\n", slug);
+        free(buffer);
+        return -EIO;
+    }
+
+    fprintf(stderr, "appfs_download: %s complete\n", slug);
 
     *data = buffer;
     *size = app_size;
@@ -887,6 +1050,12 @@ int badgelink_appfs_upload(struct badgelink_client *client,
 
     if (!client->connected)
         return -ENODEV;
+
+    /* Always negotiate protocol version before transfer */
+    negotiate_protocol_version(client);
+
+    fprintf(stderr, "appfs_upload: %s (%zu bytes, v%u)\n", metadata->slug, size,
+            client->protocol_version);
 
     /* Calculate CRC32 */
     uint32_t crc = badgelink_crc32(data, size);
@@ -954,6 +1123,7 @@ int badgelink_appfs_upload(struct badgelink_client *client,
     /* Small delay after upload to let badge settle before next operation */
     usleep(50000);  /* 50ms */
 
+    fprintf(stderr, "appfs_upload: %s complete\n", metadata->slug);
     return 0;
 }
 

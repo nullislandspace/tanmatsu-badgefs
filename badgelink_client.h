@@ -13,6 +13,11 @@
 #include <stdbool.h>
 #include "badgelink_proto.h"
 
+/* Protocol version constants */
+#define BADGELINK_PROTOCOL_V1 1
+#define BADGELINK_PROTOCOL_V2 2
+#define BADGELINK_CLIENT_VERSION BADGELINK_PROTOCOL_V2
+
 /* Directory entry for fs_list */
 struct badgelink_dirent {
     char name[256];
@@ -47,6 +52,8 @@ struct badgelink_client {
     struct badgelink_proto proto;
     bool connected;
     bool synced;
+    uint32_t protocol_version;  /* Negotiated protocol version (1 or 2) */
+    bool force_v1;              /* Skip negotiation, force v1 */
 };
 
 /*
@@ -75,6 +82,18 @@ void badgelink_client_cleanup(struct badgelink_client *client);
  * Check if connected to badge.
  */
 bool badgelink_client_is_connected(struct badgelink_client *client);
+
+/*
+ * Get negotiated protocol version.
+ * Returns BADGELINK_PROTOCOL_V1 or BADGELINK_PROTOCOL_V2.
+ */
+uint32_t badgelink_client_get_protocol_version(struct badgelink_client *client);
+
+/*
+ * Force protocol version 1 (call before connect).
+ * Skips version negotiation and uses legacy behavior.
+ */
+void badgelink_client_force_v1(struct badgelink_client *client);
 
 /* ============================================================================
  * Filesystem Operations (for /sd and /int paths)

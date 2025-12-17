@@ -149,22 +149,11 @@ static int send_frame(struct badgelink_proto *proto, const uint8_t *payload,
     if (frame_len == 0 || frame_len > sizeof(frame))
         return -ENOMEM;
 
-    fprintf(stderr, "DEBUG send_frame: payload_len=%zu frame_len=%zu crc=0x%08x\n",
-            payload_len, frame_len, crc);
-    /* Dump first bytes of protobuf payload for debugging */
-    fprintf(stderr, "DEBUG send_frame: payload[%zu]:", payload_len);
-    for (size_t i = 0; i < payload_len && i < 32; i++)
-        fprintf(stderr, " %02x", payload[i]);
-    if (payload_len > 32) fprintf(stderr, " ...");
-    fprintf(stderr, "\n");
-
     /* Send frame */
     int ret = badgelink_usb_write(&proto->usb, frame, frame_len,
                                   BADGELINK_USB_TIMEOUT);
-    if (ret < 0) {
-        fprintf(stderr, "DEBUG send_frame: write failed: %d\n", ret);
+    if (ret < 0)
         return ret;
-    }
 
     if ((size_t)ret != frame_len) {
         fprintf(stderr, "badgelink_proto: short write: %d/%zu\n",
@@ -198,15 +187,9 @@ static int fill_rx_buffer(struct badgelink_proto *proto, int timeout_ms)
     int ret = badgelink_usb_read(&proto->usb,
                                  proto->rx_buf + proto->rx_len,
                                  space, timeout_ms);
-    if (ret < 0) {
-        fprintf(stderr, "DEBUG fill_rx_buffer: read failed: %d\n", ret);
+    if (ret < 0)
         return ret;
-    }
 
-    if (ret > 0) {
-        fprintf(stderr, "DEBUG fill_rx_buffer: read %d bytes, total now=%zu\n",
-                ret, proto->rx_len + ret);
-    }
     proto->rx_len += ret;
     return ret;
 }
@@ -280,33 +263,9 @@ static int recv_frame(struct badgelink_proto *proto, uint8_t *payload,
         /* ret == 0 or -ETIMEDOUT just means no data yet, keep trying */
     }
 
-    fprintf(stderr, "DEBUG recv_frame: found frame at pos=%zu len=%zu, rx_len=%zu\n",
-            proto->rx_pos, frame_len, proto->rx_len);
-    /* Debug: show first and last few bytes of the frame */
-    if (frame_len > 8) {
-        fprintf(stderr, "DEBUG recv_frame: first 8: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                frame[0], frame[1], frame[2], frame[3], frame[4], frame[5], frame[6], frame[7]);
-        fprintf(stderr, "DEBUG recv_frame: last 8:  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                frame[frame_len-8], frame[frame_len-7], frame[frame_len-6], frame[frame_len-5],
-                frame[frame_len-4], frame[frame_len-3], frame[frame_len-2], frame[frame_len-1]);
-    }
-    /* Dump full frame (up to 64 bytes) for CRC debug */
-    fprintf(stderr, "DEBUG recv_frame: raw[%zu]:", frame_len);
-    for (size_t i = 0; i < frame_len && i < 64; i++)
-        fprintf(stderr, " %02x", frame[i]);
-    if (frame_len > 64) fprintf(stderr, " ...");
-    fprintf(stderr, "\n");
-
     /* COBS decode */
     uint8_t decoded[BADGELINK_FRAME_MAX];
     size_t decoded_len = cobs_decode(decoded, frame, frame_len);
-    fprintf(stderr, "DEBUG recv_frame: decoded_len=%zu\n", decoded_len);
-    /* Dump decoded data for CRC debug */
-    fprintf(stderr, "DEBUG recv_frame: decoded[%zu]:", decoded_len);
-    for (size_t i = 0; i < decoded_len && i < 64; i++)
-        fprintf(stderr, " %02x", decoded[i]);
-    if (decoded_len > 64) fprintf(stderr, " ...");
-    fprintf(stderr, "\n");
 
     /* Consume frame from buffer */
     proto->rx_pos += frame_len;
@@ -326,19 +285,7 @@ static int recv_frame(struct badgelink_proto *proto, uint8_t *payload,
     uint32_t calc_crc = badgelink_crc32(decoded, data_len);
 
     if (recv_crc != calc_crc) {
-        fprintf(stderr, "badgelink_proto: CRC mismatch: recv=%08x calc=%08x data_len=%zu\n",
-                recv_crc, calc_crc, data_len);
-        fprintf(stderr, "badgelink_proto: CRC bytes at decoded[%zu]: %02x %02x %02x %02x\n",
-                data_len, decoded[data_len], decoded[data_len+1],
-                decoded[data_len+2], decoded[data_len+3]);
-        fprintf(stderr, "badgelink_proto: first 16 decoded: ");
-        for (size_t i = 0; i < 16 && i < decoded_len; i++)
-            fprintf(stderr, "%02x ", decoded[i]);
-        fprintf(stderr, "\n");
-        fprintf(stderr, "badgelink_proto: last 16 decoded: ");
-        for (size_t i = decoded_len > 16 ? decoded_len - 16 : 0; i < decoded_len; i++)
-            fprintf(stderr, "%02x ", decoded[i]);
-        fprintf(stderr, "\n");
+        fprintf(stderr, "badgelink_proto: CRC mismatch\n");
         return -EIO;
     }
 
@@ -414,6 +361,9 @@ int badgelink_proto_sync(struct badgelink_proto *proto)
 {
     if (!proto)
         return -EINVAL;
+
+    /* Clear sync flag since we're explicitly syncing */
+    proto->sync_occurred = false;
 
     /* Use a random-ish serial number like Python does */
     proto->serial_no = (uint32_t)(time(NULL) ^ getpid()) & 0xFFFFFFFF;
@@ -501,8 +451,6 @@ int badgelink_proto_request(struct badgelink_proto *proto,
      */
     for (int tries = 0; tries < 5; tries++) {
         if (tries > 0) {
-            fprintf(stderr, "DEBUG proto_request: retry %d (serial=%lu)\n",
-                    tries, (unsigned long)serial);
             /*
              * DON'T drain USB on retry! The response might still be in transit.
              * Python doesn't drain - it just resends and waits.
@@ -520,41 +468,32 @@ int badgelink_proto_request(struct badgelink_proto *proto,
         req_packet.which_packet = badgelink_Packet_request_tag;
         memcpy(&req_packet.packet.request, req, sizeof(*req));
 
-        fprintf(stderr, "DEBUG proto_request: sending req serial=%lu which_req=%d try=%d\n",
-                (unsigned long)req_packet.serial, req->which_req, tries);
-
         /* Send request */
         int ret = badgelink_proto_send_packet(proto, &req_packet);
         if (ret < 0) {
-            fprintf(stderr, "DEBUG proto_request: send failed: %d\n", ret);
             last_ret = ret;
             continue;
         }
-        fprintf(stderr, "DEBUG proto_request: send succeeded\n");
 
         /* Receive response - keep trying until we get the right one or timeout */
         badgelink_Packet resp_packet;
         for (int recv_tries = 0; recv_tries < 10; recv_tries++) {
-            fprintf(stderr, "DEBUG proto_request: waiting for response (recv_try=%d timeout=%dms)\n",
-                    recv_tries, timeout_ms);
             ret = badgelink_proto_recv_packet(proto, &resp_packet, timeout_ms);
             if (ret < 0) {
-                fprintf(stderr, "DEBUG proto_request: recv failed: %d\n", ret);
                 last_ret = ret;
                 break;  /* Timeout - will retry sending */
             }
-            fprintf(stderr, "DEBUG proto_request: recv got packet serial=%lu which=%d\n",
-                    (unsigned long)resp_packet.serial, resp_packet.which_packet);
 
             /* Check if badge wants us to re-sync */
             if (resp_packet.which_packet == badgelink_Packet_sync_tag) {
-                fprintf(stderr, "DEBUG proto_request: badge requested sync\n");
                 /* Answer the sync and try receiving again */
                 badgelink_Packet sync_resp = badgelink_Packet_init_zero;
                 sync_resp.serial = resp_packet.serial;
                 sync_resp.which_packet = badgelink_Packet_sync_tag;
                 sync_resp.packet.sync = true;
                 badgelink_proto_send_packet(proto, &sync_resp);
+                /* Mark that sync occurred - badge resets to protocol v1 */
+                proto->sync_occurred = true;
                 continue;
             }
 
@@ -562,20 +501,15 @@ int badgelink_proto_request(struct badgelink_proto *proto,
             if (resp_packet.which_packet == badgelink_Packet_response_tag &&
                 resp_packet.serial == serial) {
                 /* Success - copy response */
-                fprintf(stderr, "DEBUG proto_request: success! status=%d\n",
-                        resp_packet.packet.response.status_code);
                 memcpy(resp, &resp_packet.packet.response, sizeof(*resp));
                 return 0;
             }
 
             /* Wrong serial - stale response from previous request, skip it */
-            fprintf(stderr, "DEBUG proto_request: stale response serial=%lu (expected %lu), skipping\n",
-                    (unsigned long)resp_packet.serial, (unsigned long)serial);
             /* Continue receiving - our response might be next */
         }
     }
 
-    fprintf(stderr, "DEBUG proto_request: failed after all retries: %d\n", last_ret);
     return last_ret;
 }
 
@@ -585,6 +519,5 @@ int badgelink_proto_request(struct badgelink_proto *proto,
  */
 int badgelink_proto_resync(struct badgelink_proto *proto)
 {
-    fprintf(stderr, "DEBUG proto_resync: re-syncing with badge\n");
     return badgelink_proto_sync(proto);
 }
