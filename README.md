@@ -99,6 +99,11 @@ mkdir /tmp/badge/sd/mydir
 
 # Delete directory
 rmdir /tmp/badge/sd/mydir
+
+# For easy use, you can mount/unmount the badge using make commands (mounts to /tmp/mnt):
+make mount
+make umount
+
 ```
 
 ## Command Line Options
