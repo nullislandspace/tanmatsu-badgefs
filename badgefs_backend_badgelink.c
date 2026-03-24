@@ -974,11 +974,30 @@ static int bl_truncate(const char *path, off_t size, struct fuse_file_info *fi)
 
 static int bl_rename(const char *from, const char *to, unsigned int flags)
 {
-    /* BadgeLink doesn't support rename directly */
-    /* Would need to download, delete, upload - not implemented */
-    (void)from;
-    (void)to;
-    (void)flags;
+    if (flags != 0)
+        return -EINVAL;
+
+    /* Translate FUSE paths to device paths */
+    const char *badge_from = translate_path(from);
+    const char *badge_to = translate_path(to);
+    if (!badge_from || !badge_to)
+        return -EINVAL;
+
+    pthread_mutex_lock(&state.lock);
+
+    if (state.client.protocol_version >= BADGELINK_PROTOCOL_V3) {
+        fprintf(stderr, "badgefs: rename %s -> %s\n", badge_from, badge_to);
+        int ret = badgelink_fs_rename(&state.client, badge_from, badge_to);
+        pthread_mutex_unlock(&state.lock);
+        if (ret < 0)
+            fprintf(stderr, "badgefs: rename failed: %s\n", strerror(-ret));
+        else
+            fprintf(stderr, "badgefs: rename complete\n");
+        return ret;
+    }
+
+    /* V2 fallback: return -ENOSYS, FUSE handles via read+write+unlink */
+    pthread_mutex_unlock(&state.lock);
     return -ENOSYS;
 }
 

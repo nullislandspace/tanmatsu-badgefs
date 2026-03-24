@@ -16,7 +16,8 @@
 /* Protocol version constants */
 #define BADGELINK_PROTOCOL_V1 1
 #define BADGELINK_PROTOCOL_V2 2
-#define BADGELINK_CLIENT_VERSION BADGELINK_PROTOCOL_V2
+#define BADGELINK_PROTOCOL_V3 3
+#define BADGELINK_CLIENT_VERSION BADGELINK_PROTOCOL_V3
 
 /* Directory entry for fs_list */
 struct badgelink_dirent {
@@ -153,6 +154,20 @@ int badgelink_fs_upload(struct badgelink_client *client, const char *path,
  */
 int badgelink_fs_usage(struct badgelink_client *client, const char *path,
                        struct badgelink_usage *usage);
+
+/*
+ * Copy a file on the badge.
+ * Returns 0 on success, negative error code on failure.
+ */
+int badgelink_fs_copy(struct badgelink_client *client,
+                      const char *src, const char *dest);
+
+/*
+ * Rename/move a file on the badge.
+ * Returns 0 on success, negative error code on failure.
+ */
+int badgelink_fs_rename(struct badgelink_client *client,
+                        const char *src, const char *dest);
 
 /* ============================================================================
  * AppFS Operations (for /appfs)

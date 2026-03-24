@@ -744,6 +744,68 @@ int badgelink_fs_usage(struct badgelink_client *client, const char *path,
     return 0;
 }
 
+/*
+ * Copy a file on the badge.
+ */
+int badgelink_fs_copy(struct badgelink_client *client,
+                      const char *src, const char *dest)
+{
+    if (!client || !src || !dest)
+        return -EINVAL;
+
+    if (!client->connected)
+        return -ENODEV;
+
+    /* Build copy request */
+    badgelink_Request req = badgelink_Request_init_zero;
+    req.which_req = badgelink_Request_fs_action_tag;
+    req.req.fs_action.type = badgelink_FsActionType_FsActionCopy;
+    strncpy(req.req.fs_action.path, src, sizeof(req.req.fs_action.path) - 1);
+    strncpy(req.req.fs_action.dest_path, dest, sizeof(req.req.fs_action.dest_path) - 1);
+
+    badgelink_Response resp;
+    int ret = badgelink_proto_request(&client->proto, &req, &resp,
+                                      XFER_TIMEOUT_MS);
+    if (ret < 0)
+        return ret;
+
+    if (resp.status_code != badgelink_StatusCode_StatusOk)
+        return badgelink_status_to_errno(resp.status_code);
+
+    return 0;
+}
+
+/*
+ * Rename/move a file on the badge.
+ */
+int badgelink_fs_rename(struct badgelink_client *client,
+                        const char *src, const char *dest)
+{
+    if (!client || !src || !dest)
+        return -EINVAL;
+
+    if (!client->connected)
+        return -ENODEV;
+
+    /* Build rename request */
+    badgelink_Request req = badgelink_Request_init_zero;
+    req.which_req = badgelink_Request_fs_action_tag;
+    req.req.fs_action.type = badgelink_FsActionType_FsActionRename;
+    strncpy(req.req.fs_action.path, src, sizeof(req.req.fs_action.path) - 1);
+    strncpy(req.req.fs_action.dest_path, dest, sizeof(req.req.fs_action.dest_path) - 1);
+
+    badgelink_Response resp;
+    int ret = badgelink_proto_request(&client->proto, &req, &resp,
+                                      XFER_TIMEOUT_MS);
+    if (ret < 0)
+        return ret;
+
+    if (resp.status_code != badgelink_StatusCode_StatusOk)
+        return badgelink_status_to_errno(resp.status_code);
+
+    return 0;
+}
+
 /* ============================================================================
  * AppFS Operations
  * ============================================================================ */
