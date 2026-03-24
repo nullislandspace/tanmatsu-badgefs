@@ -35,4 +35,11 @@ int badgefs_backend_badgelink_test_connection(void);
  */
 void badgefs_backend_badgelink_force_v1(void);
 
+/*
+ * Set TCP proxy target for remote badge access.
+ * Must be called before init.
+ * When set, connects via TCP to a badgelinkproxy instead of USB.
+ */
+void badgefs_backend_badgelink_set_proxy(const char *host, int port);
+
 #endif /* BADGEFS_BACKEND_BADGELINK_H */

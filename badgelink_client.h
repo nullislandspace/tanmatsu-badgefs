@@ -58,10 +58,17 @@ struct badgelink_client {
 };
 
 /*
- * Initialize the client.
+ * Initialize the client with USB transport (default).
  * Returns 0 on success, negative error code on failure.
  */
 int badgelink_client_init(struct badgelink_client *client);
+
+/*
+ * Initialize the client with TCP transport (via badgelinkproxy).
+ * Returns 0 on success, negative error code on failure.
+ */
+int badgelink_client_init_tcp(struct badgelink_client *client,
+                              const char *host, int port);
 
 /*
  * Connect to the badge.

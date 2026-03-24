@@ -49,6 +49,7 @@ static void print_usage(const char *progname)
         "  -d              Enable debug output (implies -f)\n"
         "  -s              Run single-threaded\n"
         "  -o <options>    Mount options (comma-separated)\n"
+        "  --proxy <host:port>  Connect via TCP proxy instead of USB\n"
         "  --version1      Force protocol version 1 (legacy mode)\n"
         "  -h, --help      Show this help message\n"
         "  -V, --version   Show version\n"
@@ -60,10 +61,10 @@ static void print_usage(const char *progname)
         "\n"
         "Examples:\n"
         "  mkdir /tmp/mnt\n"
-        "  %s /tmp/mnt                 # Mount filesystem\n"
-        "  %s -f /tmp/mnt              # Mount in foreground\n"
-        "  %s -d -f /tmp/mnt           # Debug mode\n"
-        "  %s -u /tmp/mnt              # Unmount filesystem\n"
+        "  %s /tmp/mnt                          # Mount via USB\n"
+        "  %s --proxy localhost:4002 /tmp/mnt    # Mount via proxy\n"
+        "  %s -f /tmp/mnt                        # Mount in foreground\n"
+        "  %s -u /tmp/mnt                        # Unmount filesystem\n"
         "\n"
         "Filesystem layout:\n"
         "  /sd             SD card on badge\n"
@@ -104,6 +105,7 @@ int main(int argc, char *argv[])
 {
     int do_unmount_flag = 0;
     int force_v1_flag = 0;
+    const char *proxy_arg = NULL;
     const char *mountpoint = NULL;
     int new_argc = 0;
     char **new_argv = malloc((argc + 2) * sizeof(char *));  /* +2 for -s flag */
@@ -139,6 +141,16 @@ int main(int argc, char *argv[])
             force_v1_flag = 1;
             continue;  /* Don't pass --version1 to FUSE */
         }
+        if (strcmp(argv[i], "--proxy") == 0) {
+            if (i + 1 < argc) {
+                proxy_arg = argv[++i];
+            } else {
+                fprintf(stderr, "Error: --proxy requires a host:port argument\n");
+                free(new_argv);
+                return 1;
+            }
+            continue;  /* Don't pass --proxy to FUSE */
+        }
         new_argv[new_argc++] = argv[i];
         /* Track mountpoint (last non-option argument) */
         if (argv[i][0] != '-') {
@@ -168,6 +180,34 @@ int main(int argc, char *argv[])
     if (force_v1_flag) {
         printf("BadgeFS: Forcing protocol version 1 (legacy mode)\n");
         badgefs_backend_badgelink_force_v1();
+    }
+
+    /* Apply proxy setting if set */
+    if (proxy_arg) {
+        char host[256];
+        int port;
+        const char *colon = strrchr(proxy_arg, ':');
+        if (!colon || colon == proxy_arg) {
+            fprintf(stderr, "Error: --proxy requires host:port format (e.g., localhost:4002)\n");
+            free(new_argv);
+            return 1;
+        }
+        size_t host_len = colon - proxy_arg;
+        if (host_len >= sizeof(host)) {
+            fprintf(stderr, "Error: hostname too long\n");
+            free(new_argv);
+            return 1;
+        }
+        memcpy(host, proxy_arg, host_len);
+        host[host_len] = '\0';
+        port = atoi(colon + 1);
+        if (port <= 0 || port > 65535) {
+            fprintf(stderr, "Error: invalid port in --proxy argument\n");
+            free(new_argv);
+            return 1;
+        }
+        printf("BadgeFS: Using TCP proxy %s:%d\n", host, port);
+        badgefs_backend_badgelink_set_proxy(host, port);
     }
 
     /* Test connection before mounting to avoid invalid mount */

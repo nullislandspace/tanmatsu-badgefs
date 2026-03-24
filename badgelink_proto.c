@@ -45,8 +45,54 @@ uint32_t badgelink_crc32_final(uint32_t crc)
     return crc ^ 0xFFFFFFFF;
 }
 
+/* Transport wrapper: write */
+static int transport_write(struct badgelink_proto *proto, const uint8_t *data,
+                           size_t len, int timeout_ms)
+{
+    return proto->transport.write(proto->transport.ctx, data, len, timeout_ms);
+}
+
+/* Transport wrapper: read */
+static int transport_read(struct badgelink_proto *proto, uint8_t *buf,
+                          size_t max_len, int timeout_ms)
+{
+    return proto->transport.read(proto->transport.ctx, buf, max_len, timeout_ms);
+}
+
+/* USB transport callbacks */
+static int usb_write_cb(void *ctx, const uint8_t *data, size_t len, int timeout_ms)
+{
+    return badgelink_usb_write((struct badgelink_usb *)ctx, data, len, timeout_ms);
+}
+
+static int usb_read_cb(void *ctx, uint8_t *buf, size_t max_len, int timeout_ms)
+{
+    return badgelink_usb_read((struct badgelink_usb *)ctx, buf, max_len, timeout_ms);
+}
+
+static int usb_is_connected_cb(void *ctx)
+{
+    return badgelink_usb_is_connected((struct badgelink_usb *)ctx);
+}
+
+/* TCP transport callbacks */
+static int tcp_write_cb(void *ctx, const uint8_t *data, size_t len, int timeout_ms)
+{
+    return badgelink_tcp_write((struct badgelink_tcp *)ctx, data, len, timeout_ms);
+}
+
+static int tcp_read_cb(void *ctx, uint8_t *buf, size_t max_len, int timeout_ms)
+{
+    return badgelink_tcp_read((struct badgelink_tcp *)ctx, buf, max_len, timeout_ms);
+}
+
+static int tcp_is_connected_cb(void *ctx)
+{
+    return badgelink_tcp_is_connected((struct badgelink_tcp *)ctx);
+}
+
 /*
- * Initialize protocol layer.
+ * Initialize protocol layer with USB transport (default).
  */
 int badgelink_proto_init(struct badgelink_proto *proto)
 {
@@ -55,8 +101,33 @@ int badgelink_proto_init(struct badgelink_proto *proto)
 
     memset(proto, 0, sizeof(*proto));
     proto->serial_no = 1;
+    proto->transport_type = BADGELINK_TRANSPORT_USB;
+    proto->transport.write = usb_write_cb;
+    proto->transport.read = usb_read_cb;
+    proto->transport.is_connected = usb_is_connected_cb;
+    proto->transport.ctx = &proto->usb;
 
     return badgelink_usb_init(&proto->usb);
+}
+
+/*
+ * Initialize protocol layer with TCP transport.
+ */
+int badgelink_proto_init_tcp(struct badgelink_proto *proto,
+                             const char *host, int port)
+{
+    if (!proto || !host)
+        return -EINVAL;
+
+    memset(proto, 0, sizeof(*proto));
+    proto->serial_no = 1;
+    proto->transport_type = BADGELINK_TRANSPORT_TCP;
+    proto->transport.write = tcp_write_cb;
+    proto->transport.read = tcp_read_cb;
+    proto->transport.is_connected = tcp_is_connected_cb;
+    proto->transport.ctx = &proto->tcp;
+
+    return badgelink_tcp_init(&proto->tcp, host, port);
 }
 
 /*
@@ -67,7 +138,13 @@ int badgelink_proto_connect(struct badgelink_proto *proto)
     if (!proto)
         return -EINVAL;
 
-    int ret = badgelink_usb_open(&proto->usb);
+    int ret;
+
+    if (proto->transport_type == BADGELINK_TRANSPORT_TCP)
+        ret = badgelink_tcp_open(&proto->tcp);
+    else
+        ret = badgelink_usb_open(&proto->usb);
+
     if (ret < 0)
         return ret;
 
@@ -80,11 +157,11 @@ int badgelink_proto_connect(struct badgelink_proto *proto)
      * have seen. Then discard any pending data from the badge.
      */
     uint8_t null_byte = 0;
-    badgelink_usb_write(&proto->usb, &null_byte, 1, 100);
+    transport_write(proto, &null_byte, 1, 100);
 
     /* Drain any pending data from badge (ignore errors/timeouts) */
     uint8_t drain_buf[256];
-    while (badgelink_usb_read(&proto->usb, drain_buf, sizeof(drain_buf), 50) > 0) {
+    while (transport_read(proto, drain_buf, sizeof(drain_buf), 50) > 0) {
         /* Keep reading until no more data */
     }
 
@@ -96,9 +173,13 @@ int badgelink_proto_connect(struct badgelink_proto *proto)
  */
 void badgelink_proto_disconnect(struct badgelink_proto *proto)
 {
-    if (proto) {
+    if (!proto)
+        return;
+
+    if (proto->transport_type == BADGELINK_TRANSPORT_TCP)
+        badgelink_tcp_close(&proto->tcp);
+    else
         badgelink_usb_close(&proto->usb);
-    }
 }
 
 /*
@@ -106,9 +187,13 @@ void badgelink_proto_disconnect(struct badgelink_proto *proto)
  */
 void badgelink_proto_cleanup(struct badgelink_proto *proto)
 {
-    if (proto) {
+    if (!proto)
+        return;
+
+    if (proto->transport_type == BADGELINK_TRANSPORT_TCP)
+        badgelink_tcp_cleanup(&proto->tcp);
+    else
         badgelink_usb_cleanup(&proto->usb);
-    }
 }
 
 /*
@@ -116,7 +201,7 @@ void badgelink_proto_cleanup(struct badgelink_proto *proto)
  */
 bool badgelink_proto_is_connected(struct badgelink_proto *proto)
 {
-    return proto && badgelink_usb_is_connected(&proto->usb);
+    return proto && proto->transport.is_connected(proto->transport.ctx);
 }
 
 /*
@@ -150,8 +235,8 @@ static int send_frame(struct badgelink_proto *proto, const uint8_t *payload,
         return -ENOMEM;
 
     /* Send frame */
-    int ret = badgelink_usb_write(&proto->usb, frame, frame_len,
-                                  BADGELINK_USB_TIMEOUT);
+    int ret = transport_write(proto, frame, frame_len,
+                              BADGELINK_USB_TIMEOUT);
     if (ret < 0)
         return ret;
 
@@ -184,9 +269,9 @@ static int fill_rx_buffer(struct badgelink_proto *proto, int timeout_ms)
     if (space == 0)
         return -ENOMEM;
 
-    int ret = badgelink_usb_read(&proto->usb,
-                                 proto->rx_buf + proto->rx_len,
-                                 space, timeout_ms);
+    int ret = transport_read(proto,
+                             proto->rx_buf + proto->rx_len,
+                             space, timeout_ms);
     if (ret < 0)
         return ret;
 
@@ -376,7 +461,7 @@ int badgelink_proto_sync(struct badgelink_proto *proto)
 
         /* Drain any pending data */
         uint8_t drain_buf[256];
-        while (badgelink_usb_read(&proto->usb, drain_buf, sizeof(drain_buf), 50) > 0) {
+        while (transport_read(proto, drain_buf, sizeof(drain_buf), 50) > 0) {
             /* Keep reading */
         }
 

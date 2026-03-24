@@ -55,7 +55,9 @@ static struct {
     pthread_mutex_t lock;
     struct open_file *open_files;
     bool initialized;
-    bool force_v1;  /* Force protocol version 1 (set before init) */
+    bool force_v1;      /* Force protocol version 1 (set before init) */
+    char proxy_host[256]; /* TCP proxy host (empty = use USB) */
+    int proxy_port;       /* TCP proxy port */
 } state;
 
 /* ============================================================================
@@ -245,7 +247,13 @@ static int bl_init(void *config)
 
     pthread_mutex_init(&state.lock, NULL);
 
-    int ret = badgelink_client_init(&state.client);
+    int ret;
+    if (state.proxy_host[0] != '\0') {
+        ret = badgelink_client_init_tcp(&state.client,
+                                        state.proxy_host, state.proxy_port);
+    } else {
+        ret = badgelink_client_init(&state.client);
+    }
     if (ret < 0) {
         fprintf(stderr, "badgefs_badgelink: failed to init client: %s\n",
                 strerror(-ret));
@@ -1260,9 +1268,15 @@ int badgefs_backend_badgelink_test_connection(void)
 {
     struct badgelink_client test_client;
 
-    int ret = badgelink_client_init(&test_client);
+    int ret;
+    if (state.proxy_host[0] != '\0') {
+        ret = badgelink_client_init_tcp(&test_client,
+                                        state.proxy_host, state.proxy_port);
+    } else {
+        ret = badgelink_client_init(&test_client);
+    }
     if (ret < 0) {
-        fprintf(stderr, "badgefs: failed to init USB: %s\n", strerror(-ret));
+        fprintf(stderr, "badgefs: failed to init transport: %s\n", strerror(-ret));
         return ret;
     }
 
@@ -1287,6 +1301,16 @@ int badgefs_backend_badgelink_test_connection(void)
 void badgefs_backend_badgelink_force_v1(void)
 {
     state.force_v1 = true;
+}
+
+/*
+ * Set TCP proxy target.
+ * Must be called before init.
+ */
+void badgefs_backend_badgelink_set_proxy(const char *host, int port)
+{
+    snprintf(state.proxy_host, sizeof(state.proxy_host), "%s", host);
+    state.proxy_port = port;
 }
 
 /* ============================================================================

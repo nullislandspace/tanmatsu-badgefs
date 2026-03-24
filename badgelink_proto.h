@@ -3,6 +3,8 @@
  *
  * Handles COBS framing, CRC32 calculation, and protobuf packet
  * serialization/deserialization.
+ *
+ * Supports both USB and TCP transports via function pointers.
  */
 
 #ifndef BADGELINK_PROTO_H
@@ -12,6 +14,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "badgelink_usb.h"
+#include "badgelink_tcp.h"
 #include "badgelink.pb.h"
 
 /* Protocol constants */
@@ -20,9 +23,26 @@
 #define BADGELINK_FRAME_MAX     8192
 #define BADGELINK_RX_BUF_SIZE   16384
 
+/* Transport type */
+enum badgelink_transport_type {
+    BADGELINK_TRANSPORT_USB,
+    BADGELINK_TRANSPORT_TCP,
+};
+
+/* Transport function pointers */
+struct badgelink_transport {
+    int (*write)(void *ctx, const uint8_t *data, size_t len, int timeout_ms);
+    int (*read)(void *ctx, uint8_t *buf, size_t max_len, int timeout_ms);
+    int (*is_connected)(void *ctx);
+    void *ctx; /* Points to either badgelink_usb or badgelink_tcp */
+};
+
 /* Protocol connection state */
 struct badgelink_proto {
+    enum badgelink_transport_type transport_type;
     struct badgelink_usb usb;
+    struct badgelink_tcp tcp;
+    struct badgelink_transport transport;
     uint64_t serial_no;     /* Next serial number to use */
     uint8_t rx_buf[BADGELINK_RX_BUF_SIZE];
     size_t rx_len;          /* Bytes currently in rx_buf */
@@ -48,10 +68,17 @@ uint32_t badgelink_crc32_update(uint32_t crc, const uint8_t *data, size_t len);
 uint32_t badgelink_crc32_final(uint32_t crc);
 
 /*
- * Initialize protocol layer.
+ * Initialize protocol layer with USB transport (default).
  * Returns 0 on success, negative error code on failure.
  */
 int badgelink_proto_init(struct badgelink_proto *proto);
+
+/*
+ * Initialize protocol layer with TCP transport.
+ * Returns 0 on success, negative error code on failure.
+ */
+int badgelink_proto_init_tcp(struct badgelink_proto *proto,
+                             const char *host, int port);
 
 /*
  * Connect to the badge.

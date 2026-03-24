@@ -61,7 +61,7 @@ int badgelink_status_to_errno(badgelink_StatusCode status)
 }
 
 /*
- * Initialize the client.
+ * Initialize the client with USB transport (default).
  */
 int badgelink_client_init(struct badgelink_client *client)
 {
@@ -75,6 +75,28 @@ int badgelink_client_init(struct badgelink_client *client)
     client->force_v1 = false;
 
     int ret = badgelink_proto_init(&client->proto);
+    if (ret < 0)
+        return ret;
+
+    return 0;
+}
+
+/*
+ * Initialize the client with TCP transport.
+ */
+int badgelink_client_init_tcp(struct badgelink_client *client,
+                              const char *host, int port)
+{
+    if (!client || !host)
+        return -EINVAL;
+
+    memset(client, 0, sizeof(*client));
+
+    /* Default to V1 until version negotiation completes */
+    client->protocol_version = BADGELINK_PROTOCOL_V1;
+    client->force_v1 = false;
+
+    int ret = badgelink_proto_init_tcp(&client->proto, host, port);
     if (ret < 0)
         return ret;
 

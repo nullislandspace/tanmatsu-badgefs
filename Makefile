@@ -18,6 +18,7 @@ BADGELINK_SRCS = badgefs_backend_badgelink.c \
                  badgelink_client.c \
                  badgelink_proto.c \
                  badgelink_usb.c \
+                 badgelink_tcp.c \
                  cobs.c
 
 # Nanopb (Protocol Buffers for C)
@@ -30,30 +31,40 @@ OBJS = $(SRCS:.c=.o)
 # Headers
 HEADERS = badgefs_ops.h badgefs_backend.h \
           badgefs_backend_badgelink.h badgelink_client.h \
-          badgelink_proto.h badgelink_usb.h badgelink.pb.h \
+          badgelink_proto.h badgelink_usb.h badgelink_tcp.h badgelink.pb.h \
           cobs.h pb.h pb_common.h pb_encode.h pb_decode.h
 
 TARGET = badgefs
 
+# BadgeLink proxy (TCP-to-USB, no FUSE dependency)
+PROXY_TARGET = badgelinkproxy
+PROXY_CFLAGS = -Wall -Wextra -g $(shell pkg-config libusb-1.0 --cflags)
+PROXY_LDFLAGS = $(shell pkg-config libusb-1.0 --libs)
+
 .PHONY: all clean install uninstall help
 
-all: $(TARGET)
+all: $(TARGET) $(PROXY_TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)
+
+$(PROXY_TARGET): badgelinkproxy.c
+	$(CC) $(PROXY_CFLAGS) $< -o $@ $(PROXY_LDFLAGS)
 
 %.o: %.c $(HEADERS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(TARGET) $(PROXY_TARGET)
 
 # Install to /usr/local/bin (requires sudo)
-install: $(TARGET)
+install: $(TARGET) $(PROXY_TARGET)
 	install -m 755 $(TARGET) /usr/local/bin/
+	install -m 755 $(PROXY_TARGET) /usr/local/bin/
 
 uninstall:
 	rm -f /usr/local/bin/$(TARGET)
+	rm -f /usr/local/bin/$(PROXY_TARGET)
 
 mount: $(TARGET)
 	mkdir -p /tmp/mnt
