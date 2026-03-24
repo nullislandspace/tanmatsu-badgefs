@@ -41,9 +41,13 @@ PROXY_TARGET = badgelinkproxy
 PROXY_CFLAGS = -Wall -Wextra -g $(shell pkg-config libusb-1.0 --cflags)
 PROXY_LDFLAGS = $(shell pkg-config libusb-1.0 --libs)
 
+# RFC2217 proxy (telnet COM port to serial, no external dependencies)
+RFC2217_TARGET = rfc2217proxy
+RFC2217_CFLAGS = -Wall -Wextra -g
+
 .PHONY: all clean install uninstall help
 
-all: $(TARGET) $(PROXY_TARGET)
+all: $(TARGET) $(PROXY_TARGET) $(RFC2217_TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)
@@ -51,20 +55,25 @@ $(TARGET): $(OBJS)
 $(PROXY_TARGET): badgelinkproxy.c
 	$(CC) $(PROXY_CFLAGS) $< -o $@ $(PROXY_LDFLAGS)
 
+$(RFC2217_TARGET): rfc2217proxy.c
+	$(CC) $(RFC2217_CFLAGS) $< -o $@
+
 %.o: %.c $(HEADERS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(PROXY_TARGET)
+	rm -f $(OBJS) $(TARGET) $(PROXY_TARGET) $(RFC2217_TARGET)
 
 # Install to /usr/local/bin (requires sudo)
-install: $(TARGET) $(PROXY_TARGET)
+install: $(TARGET) $(PROXY_TARGET) $(RFC2217_TARGET)
 	install -m 755 $(TARGET) /usr/local/bin/
 	install -m 755 $(PROXY_TARGET) /usr/local/bin/
+	install -m 755 $(RFC2217_TARGET) /usr/local/bin/
 
 uninstall:
 	rm -f /usr/local/bin/$(TARGET)
 	rm -f /usr/local/bin/$(PROXY_TARGET)
+	rm -f /usr/local/bin/$(RFC2217_TARGET)
 
 mount: $(TARGET)
 	mkdir -p /tmp/mnt
