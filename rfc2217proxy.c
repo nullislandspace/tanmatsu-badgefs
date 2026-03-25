@@ -522,13 +522,18 @@ static void esp_reset_to_bootloader(int fd)
 }
 
 /*
- * Track download mode state. When we see the first DTR ON, we run
- * the full bootloader entry sequence locally and absorb subsequent
- * DTR/RTS changes for a few seconds while esptool cycles through
- * its (wrong) ClassicReset strategies.
+ * Track download mode state and detect bootloader entry pattern.
+ *
+ * esptool's ClassicReset sends: DTR OFF → RTS ON → DTR ON → RTS OFF
+ * Monitor's hard reset sends: RTS LOW (+ DTR re-set workaround)
+ *
+ * We only trigger USBJTAGSerialReset when we see DTR ON after RTS ON
+ * was recently set (the ClassicReset pattern). A standalone DTR ON
+ * (from monitor's _setRTS workaround) is forwarded normally.
  */
 #include <time.h>
 static int in_download_mode = 0;
+static int negotiation_done = 0; /* set after first data byte from client */
 static struct timespec download_mode_start;
 
 static int download_mode_expired(void)
@@ -692,18 +697,21 @@ static void handle_com_port_subneg(struct proxy_state *ps,
 			break;
 		case CONTROL_DTR_ON:
 			if (download_mode_expired()) {
-				/*
-				 * Bootloader entry. Run the correct
-				 * USBJTAGSerialReset sequence locally.
-				 * The fd stays open — no close/reopen.
-				 * Absorb subsequent DTR/RTS from esptool's
-				 * ClassicReset which would be wrong for
-				 * this device.
-				 */
-				in_download_mode = 1;
-				clock_gettime(CLOCK_MONOTONIC,
-				              &download_mode_start);
-				esp_reset_to_bootloader(serial_fd);
+				if (negotiation_done) {
+					/*
+					 * DTR ON after data has flowed =
+					 * bootloader entry (esptool reset).
+					 * Run USBJTAGSerialReset locally.
+					 */
+					in_download_mode = 1;
+					clock_gettime(CLOCK_MONOTONIC,
+					              &download_mode_start);
+					esp_reset_to_bootloader(serial_fd);
+				} else {
+					/* During initial negotiation —
+					 * just forward normally */
+					serial_set_dtr(serial_fd, 1);
+				}
 			}
 			/* else: absorbed — reset already done */
 			break;
@@ -721,15 +729,8 @@ static void handle_com_port_subneg(struct proxy_state *ps,
 			/* else: absorbed */
 			break;
 		case CONTROL_RTS_OFF:
-			if (download_mode_expired()) {
-				/*
-				 * Hard reset (e.g. --after=hard_reset).
-				 * Forward directly — fd stays valid.
-				 */
-				serial_set_rts(serial_fd, 1);
-				usleep(200000);
+			if (download_mode_expired())
 				serial_set_rts(serial_fd, 0);
-			}
 			/* else: absorbed */
 			break;
 		}
@@ -788,19 +789,17 @@ static void handle_com_port_subneg(struct proxy_state *ps,
  */
 static int telnet_send_initial(int fd)
 {
-	if (telnet_send_option(fd, WILL, OPT_BINARY) < 0)
-		return -1;
-	if (telnet_send_option(fd, DO, OPT_BINARY) < 0)
-		return -1;
-	if (telnet_send_option(fd, WILL, OPT_SGA) < 0)
-		return -1;
-	if (telnet_send_option(fd, DO, OPT_SGA) < 0)
-		return -1;
-	if (telnet_send_option(fd, WILL, OPT_COM_PORT) < 0)
-		return -1;
-	if (telnet_send_option(fd, DO, OPT_ECHO) < 0)
-		return -1;
-	return 0;
+	/* Send all initial negotiations in a single write to ensure
+	 * they arrive together, especially through SSH tunnels. */
+	uint8_t buf[] = {
+		IAC, WILL, OPT_BINARY,
+		IAC, DO,   OPT_BINARY,
+		IAC, WILL, OPT_SGA,
+		IAC, DO,   OPT_SGA,
+		IAC, WILL, OPT_COM_PORT,
+		IAC, DO,   OPT_ECHO,
+	};
+	return tcp_send(fd, buf, sizeof(buf));
 }
 
 static void handle_telnet_option(struct proxy_state *ps, uint8_t action,
@@ -861,6 +860,7 @@ static int process_tcp_byte(struct proxy_state *ps, uint8_t byte)
 			ps->tstate = TS_IAC;
 		} else {
 			/* Data byte — buffer for serial port */
+			negotiation_done = 1;
 			ps->serial_buf[ps->serial_buf_len++] = byte;
 		}
 		break;
@@ -973,6 +973,9 @@ static void handle_client(int client_fd, const char *device,
 		close(client_fd);
 		return;
 	}
+
+	in_download_mode = 0;
+	negotiation_done = 0;
 
 	fprintf(stderr, "rfc2217proxy: client connected, serial %s @ %u\n",
 	        device, baud);
