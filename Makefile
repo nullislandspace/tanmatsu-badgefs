@@ -72,7 +72,7 @@ clean:
 	rm -f $(OBJS) $(TARGET) $(PROXY_TARGET) $(RFC2217_TARGET) $(TEST_RESET_TARGET)
 
 # Install to /usr/local/bin (requires sudo)
-install: $(TARGET) $(PROXY_TARGET) $(RFC2217_TARGET) $(TEST_RESET_TARGET)
+install: $(TARGET) $(PROXY_TARGET) $(RFC2217_TARGET)
 	install -m 755 $(TARGET) /usr/local/bin/
 	install -m 755 $(PROXY_TARGET) /usr/local/bin/
 	install -m 755 $(RFC2217_TARGET) /usr/local/bin/

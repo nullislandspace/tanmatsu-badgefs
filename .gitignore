@@ -5,8 +5,11 @@
 .hg
 .hgignore
 
-# Binary
+# Binaries
 badgefs
+badgelinkproxy
+rfc2217proxy
+test_reset
 test_download
 application.bin
 ProtocolV2.md
