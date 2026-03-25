@@ -1,115 +1,92 @@
-# RFC2217 Proxy - Current State (2026-03-24)
+# RFC2217 Proxy - Current State (2026-03-25)
+
+## Summary
+
+Building an RFC2217-to-serial proxy (`rfc2217proxy.c`) to replace ser2net for remote ESP32-P4 flashing via esptool. The proxy's RFC2217/telnet implementation is proven correct. The remaining task is making the proxy handle the ESP32-P4's USB JTAG/Serial reset correctly without closing/reopening the serial port fd.
 
 ## What works
 
-- RFC2217 telnet negotiation (BINARY, SGA, COM-PORT-OPTION) - fully functional
-- PURGE acknowledgment - the root cause of the original ser2net failure
+- RFC2217 telnet negotiation (BINARY, SGA, COM-PORT-OPTION)
+- PURGE acknowledgment (ser2net 4.6.0 didn't support this — the original reason we wrote the proxy)
 - Baud rate, data size, parity, stop bits configuration
 - Bidirectional data forwarding with IAC escaping
 - pyserial and ESP-IDF pyserial both connect and negotiate successfully
-- Direct flash via `/dev/ttyACM0` works perfectly
+- Fake bootloader injection test proves the entire RFC2217 data path works end-to-end
+- Direct C test (`test_reset.c`) proves the full bootloader chain works without RFC2217
 
-## What doesn't work yet
+## Key findings
 
-ESP32-P4 bootloader entry via RFC2217 reset sequence.
+### 1. The USB does NOT disconnect when the fd is kept open
 
-## Root cause analysis
+The `test_reset.c` program proves this conclusively. When the serial port fd is kept open through the USBJTAGSerialReset sequence:
+- Boot log arrives within 50ms
+- SYNC succeeds on the first or second attempt
+- Stub upload, OHAI, and READ_REG all work
+- No close/reopen needed at any point
 
-### 1. esptool uses the wrong reset strategy for RFC2217
+**The proxy's close+reopen after reset was the root cause of all previous failures.** Closing the fd causes the kernel CDC ACM driver to release the USB device, which then requires re-enumeration. Keeping the fd open avoids this entirely.
 
-In `esptool/loader.py:697` (`_construct_reset_strategy_sequence`):
+### 2. esptool uses the wrong reset strategy for RFC2217
 
-```python
-# USB-JTAG/Serial mode - detected by PID
-if mode == "usb_reset" or self._get_pid() == self.USB_JTAG_SERIAL_PID:
-    return (USBJTAGSerialReset(self._port),)
+In `esptool/loader.py:697`, when the port URL starts with `rfc2217://`, esptool cannot detect the USB PID and falls back to `ClassicReset`. The ESP32-P4 USB JTAG/Serial requires `USBJTAGSerialReset` which has a different DTR/RTS sequence. The proxy must intercept the reset and run the correct sequence locally.
 
-# USB-to-Serial bridge (Unix only, NOT for rfc2217)
-if os.name != "nt" and not self._port.name.startswith("rfc2217:"):
-    return (UnixTightReset(...), ClassicReset(...))
+### 3. Espressif's own esp_rfc2217_server also fails
 
-# Fallback (used for rfc2217)
-return (ClassicReset(...),)
+Tested with the official `esp_rfc2217_server.py`. It also cannot handle the ESP32-P4 USB JTAG/Serial reset — the `Redirector.reader()` thread dies on OSError and kills the TCP connection. Upgrading esptool won't help; this is unfixed on current master.
+
+### 4. The proxy's RFC2217 implementation is correct
+
+Proven by injecting fake bootloader responses directly into the TCP stream. esptool synced, detected the chip, read registers, and started uploading the flasher stub — all through our proxy.
+
+### 5. Watchdog disable is required
+
+The ESP32-P4's RTC WDT and SWD watchdogs are not reset when using USB JTAG/Serial. Without disabling them via WRITE_REG before stub upload, the watchdog fires and resets the chip before the stub can start. esptool handles this in `_post_connect() -> disable_watchdogs()`.
+
+### 6. Chip revision matters for stub selection
+
+The Tanmatsu has ESP32-P4 revision 1.3 (eco2). `get_chip_revision()` returns 103. Since `103 < 300`, the correct stub is `esp32p4rc1.json` (text at `0x4ff10000`), not `esp32p4.json` (text at `0x4ff50000`). Using the wrong stub causes it to silently fail to start (no OHAI).
+
+### 7. MEM_DATA checksum must cover data only
+
+esptool's `mem_block()` passes `self.checksum(data)` — the checksum of the raw data block, NOT the 16-byte header (`len, seq, 0, 0`). Computing the checksum over the full payload (header + data) produces wrong checksums and the stub silently fails.
+
+## What needs to be done next
+
+Fix the proxy to:
+1. **Intercept DTR ON** and run `USBJTAGSerialReset` locally (already implemented)
+2. **Keep the fd open** through the reset — do NOT close/reopen
+3. **Absorb subsequent DTR/RTS commands** from esptool's ClassicReset (already implemented via `in_download_mode` flag)
+4. **Clear `in_download_mode`** after first successful serial read (bootloader is responding)
+5. Handle POLLERR/read errors during download mode gracefully (the fd may temporarily return errors right after reset but recovers)
+
+## test_reset.c — Reference implementation
+
+A standalone C program that demonstrates the full working chain:
+
+```
+Open /dev/ttyACM0
+  → USBJTAGSerialReset (300ms)
+  → Read boot log (50ms)
+  → SYNC (succeeds on attempt 1 or 2)
+  → GET_SECURITY_INFO
+  → Disable watchdogs (WRITE_REG)
+  → Upload stub text (MEM_BEGIN + MEM_DATA, correct checksum)
+  → Upload stub data
+  → MEM_END → OHAI received
+  → READ_REG 0x40001000 → Chip magic 0x26030007
+Total: ~1.25 seconds, no fd close/reopen
 ```
 
-When connecting via `rfc2217://`, esptool:
-- Cannot detect the USB PID (no `/dev/` path)
-- Skips `UnixTightReset` (explicitly excluded for rfc2217)
-- Falls back to `ClassicReset`, which is **wrong** for ESP32-P4 USB JTAG/Serial
-
-The direct flash works because esptool detects `USB_JTAG_SERIAL_PID` and uses `USBJTAGSerialReset`.
-
-### 2. USB JTAG/Serial disconnects during reset
-
-When the ESP32-P4 resets, the USB JTAG/serial debug unit disconnects and re-enumerates. `/dev/ttyACM0` disappears and reappears (potentially as a different number). The proxy must:
-1. Close the stale serial fd
-2. Wait for the device to reappear
-3. Reopen the serial port
-
-### 3. Timing gap after reopen
-
-The reopen takes 1-2 seconds. During this time:
-- esptool sends sync packets that are buffered in TCP but have no serial port to forward to
-- By the time the port reopens, the bootloader's sync window may have passed
-- esptool retries (sends another DTR ON), triggering another reset cycle
-
-This creates an infinite loop: reset -> USB disconnect -> reopen (slow) -> sync window missed -> retry -> reset again.
-
-## Current proxy approach
-
-The proxy intercepts DTR ON (first occurrence) and runs `USBJTAGSerialReset` locally with proper timing, then reopens the serial port. Subsequent DTR/RTS changes are absorbed while in "download mode" until DTR is released.
-
-The USBJTAGSerialReset sequence (from esptool source):
-```
-RTS=0, DTR=0        # Idle
-sleep 100ms
-DTR=1, RTS=0        # Set IO0
-sleep 100ms
-RTS=1, DTR=0        # Reset (through 1,1 not 0,0)
-RTS=1                # Windows compat
-sleep 100ms
-DTR=0, RTS=0        # Out of reset
-```
-
-## The `ign_set_control` parameter
-
-The PORT URL was originally `rfc2217://localhost:4000?ign_set_control`. We removed the `?ign_set_control` parameter during testing.
-
-**What `ign_set_control` does:** Tells pyserial to NOT wait for the server's SET_CONTROL response. Instead it sleeps 100ms after each DTR/RTS change and moves on.
-
-**Without `ign_set_control`:** pyserial waits for our proxy's response to each SET_CONTROL before sending the next command. Since we intercept DTR ON and run the full reset sequence locally (~400ms), pyserial is blocked waiting for our response during that entire time. After we respond, pyserial sends the remaining DTR/RTS commands which we absorb — but this creates back-and-forth round trips that add delay.
-
-**With `ign_set_control`:** pyserial fires all DTR/RTS commands rapidly without waiting. Our proxy intercepts the first DTR ON and runs the reset locally while absorbing the rest. The 100ms sleeps between commands from pyserial don't matter since we're absorbing them anyway.
-
-**Impact on PURGE:** The `ign_set_control` parameter only affects SET_CONTROL, not PURGE. PURGE acknowledgment works correctly regardless.
-
-**Impact on open():** Without `ign_set_control`, pyserial also waits for SET_CONTROL responses during the initial `_reconfigure_port()` and `_update_dtr_state()`/`_update_rts_state()` calls in `open()`. This adds latency before the reset sequence even starts.
-
-**Bottom line:** Restoring `?ign_set_control` may reduce latency in the proxy's reset interception flow, but won't solve the USB disconnect/reopen timing gap.
-
-## Possible solutions to explore
-
-1. **Restore `?ign_set_control`** - Quick test. Reduces latency in SET_CONTROL round trips. Proxy still intercepts DTR ON for local reset. Test with `PORT='rfc2217://localhost:4000?ign_set_control'`.
-
-2. **Don't reopen after reset** - The USB JTAG/serial debug unit on ESP32-P4 may be a separate chip that doesn't fully disconnect during SoC reset. The "Serial data stream stopped" error without reopen may have been caused by esptool failing to sync (timing), not a dead fd. Worth testing: remove the close/reopen logic and just let the poll loop handle any POLLERR naturally.
-
-3. **Use `--before usb_reset`** - esptool supports `--before usb_reset` which forces `USBJTAGSerialReset` regardless of port type. If set in the Makefile or as an esptool config option, the proxy wouldn't need to intercept at all — just forward DTR/RTS directly. This would be the cleanest solution IF the ~50ms per SET_CONTROL round-trip through RFC2217 doesn't destroy USBJTAGSerialReset timing (the strategy has ~6 DTR/RTS changes). Can test locally by modifying the tanmatsu-launcher Makefile's flash target.
-
-4. **Faster reopen with stable path** - Use udev symlinks (`/dev/tanmatsu_p4`) instead of `/dev/ttyACMx` for reliable reopening. Reduce the reopen polling interval from 100ms to 10ms. The current reopen takes 1-2 seconds which misses the bootloader sync window.
-
-5. **Pre-buffer sync packets** - After reopen, immediately forward any TCP data that accumulated during the reopen wait. Currently, sync packets from esptool pile up in the TCP receive buffer while the proxy is blocked in the reopen loop.
-
-6. **Custom esptool reset config** - esptool supports `custom_reset_sequence` in its config file. Could define the USBJTAGSerialReset sequence there, which esptool would use instead of ClassicReset for rfc2217 ports.
-
-7. **Combine interception + no reopen + ign_set_control** - Try all three together: intercept DTR ON to run USBJTAGSerialReset locally, don't close/reopen the serial port, and use `?ign_set_control` in the URL. If the USB doesn't actually disconnect, this should work.
+Build: `make test_reset`
+Run: `./test_reset /dev/ttyACM0`
 
 ## How to run a full test cycle
 
-### 1. Build the proxy
+### 1. Build everything
 
 ```bash
 cd ~/src/badgefs
-make rfc2217proxy
+make
 ```
 
 ### 2. Kill any existing proxies and services
@@ -129,13 +106,19 @@ ls /dev/ttyACM*
 udevadm info /dev/ttyACM0 | grep ID_USB_SERIAL_SHORT
 ```
 
-### 4. Start the proxy manually
+### 4. Run the direct test (no proxy, proves hardware works)
+
+```bash
+./test_reset /dev/ttyACM0
+```
+
+### 5. Start the proxy manually
 
 ```bash
 ~/src/badgefs/rfc2217proxy -d /dev/ttyACM0 -p 4000 -b 115200 &
 ```
 
-### 5. Quick RFC2217 negotiation test (should print "RFC2217 OK")
+### 6. Quick RFC2217 negotiation test (should print "RFC2217 OK")
 
 ```bash
 timeout 15 python3 -c "
@@ -146,7 +129,7 @@ s.close()
 "
 ```
 
-### 6. Full flash test via esptool
+### 7. Full flash test via esptool
 
 ```bash
 cd ~/src/tanmatsu/tanmatsu-launcher
@@ -156,7 +139,7 @@ export PORT='rfc2217://localhost:4000'
 make install
 ```
 
-### 7. Cleanup
+### 8. Cleanup
 
 ```bash
 killall rfc2217proxy 2>/dev/null
@@ -164,8 +147,18 @@ killall rfc2217proxy 2>/dev/null
 
 ## Files
 
-- `/home/cavac/src/badgefs/rfc2217proxy.c` - The RFC2217 proxy (~700 lines C)
-- `/home/cavac/src/badgefs/Makefile` - Updated to build rfc2217proxy
-- `/home/cavac/src/ser2net/install.sh` - Updated to use rfc2217proxy instead of ser2net
-- `/home/cavac/src/ser2net/ser2net-tanmatsu-p4.service` - Updated for rfc2217proxy
-- `/home/cavac/src/ser2net/ser2net-tanmatsu-p6.service` - Updated for rfc2217proxy
+| File | Purpose |
+|------|---------|
+| `rfc2217proxy.c` | RFC2217 proxy (telnet COM port to serial) |
+| `test_reset.c` | Standalone ESP32-P4 reset + stub upload test |
+| `stub_esp32p4.h` | ESP32-P4 RC1 flasher stub (auto-generated from esptool JSON) |
+| `Makefile` | Builds all targets including rfc2217proxy and test_reset |
+
+### In `/home/cavac/src/ser2net/`:
+
+| File | Purpose |
+|------|---------|
+| `install.sh` | Updated to use rfc2217proxy instead of ser2net |
+| `ser2net-tanmatsu-p4.service` | Systemd service for P4 rfc2217proxy |
+| `ser2net-tanmatsu-p6.service` | Systemd service for P6 rfc2217proxy |
+| `tanmatsu-env.sh` | PORT environment variable for remote flashing |

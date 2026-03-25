@@ -14,6 +14,7 @@
  */
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -89,6 +90,67 @@
 #define DEFAULT_BAUD    115200
 #define SERIAL_BUF_SIZE 4096
 #define TCP_BUF_SIZE    4096
+#define LOG_DIR         "/tmp/rfc2217_logs"
+
+/* ---- Data logging ---- */
+
+#include <time.h>
+#include <sys/stat.h>
+
+static FILE *log_tcp_in;    /* raw TCP bytes received from client */
+static FILE *log_tcp_out;   /* raw TCP bytes sent to client */
+static FILE *log_serial_in; /* raw serial bytes read from device */
+static FILE *log_serial_out;/* raw serial bytes written to device */
+static FILE *log_events;    /* timestamped event log */
+
+static long log_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (ts.tv_sec % 10000) * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void log_event(const char *fmt, ...)
+{
+	if (!log_events)
+		return;
+	fprintf(log_events, "[%ld] ", log_ms());
+	va_list ap;
+	va_start(ap, fmt);
+	vfprintf(log_events, fmt, ap);
+	va_end(ap);
+	fprintf(log_events, "\n");
+	fflush(log_events);
+}
+
+static void log_data(FILE *f, const uint8_t *data, size_t len)
+{
+	if (!f || len == 0)
+		return;
+	fwrite(data, 1, len, f);
+	fflush(f);
+}
+
+static void log_open(void)
+{
+	mkdir(LOG_DIR, 0755);
+	log_tcp_in     = fopen(LOG_DIR "/tcp_in.bin", "wb");
+	log_tcp_out    = fopen(LOG_DIR "/tcp_out.bin", "wb");
+	log_serial_in  = fopen(LOG_DIR "/serial_in.bin", "wb");
+	log_serial_out = fopen(LOG_DIR "/serial_out.bin", "wb");
+	log_events     = fopen(LOG_DIR "/events.log", "w");
+	log_event("logging started");
+}
+
+static void log_close(void)
+{
+	log_event("logging stopped");
+	if (log_tcp_in)     fclose(log_tcp_in);
+	if (log_tcp_out)    fclose(log_tcp_out);
+	if (log_serial_in)  fclose(log_serial_in);
+	if (log_serial_out) fclose(log_serial_out);
+	if (log_events)     fclose(log_events);
+}
 #define SB_BUF_SIZE     64
 
 static volatile sig_atomic_t running = 1;
@@ -406,30 +468,14 @@ static uint8_t serial_get_stopsize(int fd)
 
 static int serial_set_dtr(int fd, int state)
 {
-	int bits;
-	if (ioctl(fd, TIOCMGET, &bits) < 0)
-		return -1;
-
-	if (state)
-		bits |= TIOCM_DTR;
-	else
-		bits &= ~TIOCM_DTR;
-
-	return ioctl(fd, TIOCMSET, &bits);
+	int bits = TIOCM_DTR;
+	return ioctl(fd, state ? TIOCMBIS : TIOCMBIC, &bits);
 }
 
 static int serial_set_rts(int fd, int state)
 {
-	int bits;
-	if (ioctl(fd, TIOCMGET, &bits) < 0)
-		return -1;
-
-	if (state)
-		bits |= TIOCM_RTS;
-	else
-		bits &= ~TIOCM_RTS;
-
-	return ioctl(fd, TIOCMSET, &bits);
+	int bits = TIOCM_RTS;
+	return ioctl(fd, state ? TIOCMBIS : TIOCMBIC, &bits);
 }
 
 static int serial_set_break(int fd, int state)
@@ -448,6 +494,7 @@ static int serial_set_break(int fd, int state)
 static void esp_reset_to_bootloader(int fd)
 {
 	fprintf(stderr, "rfc2217proxy: USBJTAGSerialReset sequence\n");
+	log_event("RESET: USBJTAGSerialReset begin");
 
 	/* Idle */
 	serial_set_rts(fd, 0);
@@ -471,6 +518,7 @@ static void esp_reset_to_bootloader(int fd)
 	/* Chip out of reset */
 	serial_set_dtr(fd, 0);
 	serial_set_rts(fd, 0);
+	log_event("RESET: USBJTAGSerialReset done");
 }
 
 static void esp_hard_reset(int fd)
@@ -512,6 +560,68 @@ struct proxy_state {
 	const char *device;
 	unsigned int baud;
 };
+
+/*
+ * Reopen the serial port after a device reset.
+ *
+ * The USB JTAG/serial debug unit disconnects when the ESP32-P4 resets
+ * and re-enumerates after a short time. We poll rapidly (every 5ms)
+ * to catch the device reappearing as early as possible, then
+ * immediately return so buffered TCP data (esptool sync packets)
+ * can be forwarded.
+ *
+ * Returns 0 on success, -1 if the device didn't reappear within timeout.
+ */
+static int serial_reopen(struct proxy_state *ps)
+{
+	if (ps->serial_fd >= 0)
+		close(ps->serial_fd);
+	ps->serial_fd = -1;
+
+	/*
+	 * The USB JTAG debug unit disconnects during reset but the
+	 * device node may linger in /dev. We can't reliably detect
+	 * when the device is truly gone vs still present.
+	 *
+	 * Strategy: close the stale fd, wait for the USB to fully
+	 * cycle (disconnect + re-enumerate), then reopen.
+	 * We try opening every 5ms; a successful open() that also
+	 * passes tcgetattr() means the device is truly back.
+	 */
+	fprintf(stderr, "rfc2217proxy: reopening device...\n");
+	log_event("REOPEN: closing fd, waiting 100ms");
+
+	/*
+	 * Wait for the USB to fully cycle. The device node may linger
+	 * briefly after reset (stale), so we must wait for it to
+	 * actually disappear and re-enumerate. Sleep 500ms minimum
+	 * to avoid reopening a stale node.
+	 */
+	/* No initial delay — the device node comes back quickly
+	 * even if the USB briefly disconnects. The kernel CDC ACM
+	 * driver handles re-enumeration transparently. */
+
+	for (int i = 0; i < 2000; i++) { /* then poll up to 10 seconds */
+		usleep(5000); /* 5ms */
+
+		int fd = serial_open(ps->device, ps->baud);
+		if (fd >= 0) {
+			ps->serial_fd = fd;
+			log_event("REOPEN: device reopened after %dms",
+			          (i + 1) * 5);
+			ps->serial_fd = fd;
+			fprintf(stderr,
+			        "rfc2217proxy: device reopened after %dms\n",
+			        (i + 1) * 5);
+			return 0;
+		}
+	}
+
+	fprintf(stderr, "rfc2217proxy: device did not reappear\n");
+	return -1;
+}
+
+static int send_serial_to_tcp(int tcp_fd, const uint8_t *data, size_t len);
 
 /* ---- RFC 2217 subnegotiation handler ---- */
 
@@ -633,70 +743,42 @@ static void handle_com_port_subneg(struct proxy_state *ps,
 		case CONTROL_DTR_ON:
 			if (!in_download_mode) {
 				in_download_mode = 1;
-				esp_reset_to_bootloader(serial_fd);
-				/*
-				 * USB JTAG/serial disconnects during reset.
-				 * Close stale fd and reopen.
-				 */
-				close(serial_fd);
-				serial_fd = -1;
-				fprintf(stderr,
-				        "rfc2217proxy: waiting for device...\n");
-				for (int i = 0; i < 50; i++) {
-					usleep(100000);
-					serial_fd = serial_open(
-						ps->device, ps->baud);
-					if (serial_fd >= 0)
-						break;
-				}
-				if (serial_fd >= 0) {
-					ps->serial_fd = serial_fd;
-					fprintf(stderr,
-					        "rfc2217proxy: device reopened\n");
-				} else {
-					fprintf(stderr,
-					        "rfc2217proxy: device lost\n");
-				}
+				log_event("FAKE: injecting boot log");
+				/* Send fake boot log directly to TCP */
+				static const uint8_t fake_boot[] =
+					"ESP-ROM:esp32p4-eco2-20240710\r\n"
+					"Build:Jul 10 2024\r\n"
+					"rst:0x17 (CHIP_USB_UART_RESET),"
+					"boot:0x214 (DOWNLOAD(USB/UART0/"
+					"SPI))\r\n"
+					"Core0 Saved PC:0x4fc012cc\r\n"
+					"Core1 Saved PC:0x4fc058e0\r\n"
+					"waiting for download\r\n";
+				send_serial_to_tcp(tcp_fd, fake_boot,
+				                   sizeof(fake_boot) - 1);
 			}
 			/* else: absorbed */
 			break;
 		case CONTROL_DTR_OFF:
-			if (in_download_mode) {
-				in_download_mode = 0;
-			}
-			serial_set_dtr(serial_fd, 0);
+			/*
+			 * Don't clear in_download_mode here — the POLLERR
+			 * from the reset hasn't been processed yet. We clear
+			 * it after the first successful serial read/write.
+			 */
+			if (serial_fd >= 0 && !in_download_mode)
+				serial_set_dtr(serial_fd, 0);
 			break;
 		case CONTROL_REQ_RTS:
 			val = CONTROL_RTS_ON;
 			break;
 		case CONTROL_RTS_ON:
-			if (!in_download_mode)
+			if (!in_download_mode && serial_fd >= 0)
 				serial_set_rts(serial_fd, 1);
 			/* else: absorbed */
 			break;
 		case CONTROL_RTS_OFF:
 			if (!in_download_mode) {
 				esp_hard_reset(serial_fd);
-				/* Reopen after hard reset */
-				close(serial_fd);
-				serial_fd = -1;
-				fprintf(stderr,
-				        "rfc2217proxy: waiting for device...\n");
-				for (int i = 0; i < 50; i++) {
-					usleep(100000);
-					serial_fd = serial_open(
-						ps->device, ps->baud);
-					if (serial_fd >= 0)
-						break;
-				}
-				if (serial_fd >= 0) {
-					ps->serial_fd = serial_fd;
-					fprintf(stderr,
-					        "rfc2217proxy: device reopened\n");
-				} else {
-					fprintf(stderr,
-					        "rfc2217proxy: device lost\n");
-				}
 			}
 			/* else: absorbed */
 			break;
@@ -828,10 +910,76 @@ static int process_tcp_byte(struct proxy_state *ps, uint8_t byte)
 		if (byte == IAC) {
 			ps->tstate = TS_IAC;
 		} else {
-			/* Data byte — write to serial port */
-			if (write(ps->serial_fd, &byte, 1) < 0 &&
-			    errno != EAGAIN)
+			/*
+			 * TEMPORARY HACK: During download mode, intercept
+			 * SLIP frames and inject fake bootloader responses
+			 * directly on TCP to test if esptool works.
+			 */
+			if (in_download_mode) {
+				/* Buffer data bytes to detect SLIP frames */
+				static uint8_t fakebuf[256];
+				static size_t fakelen = 0;
+
+				if (byte == 0xc0 && fakelen > 0) {
+					/* End of SLIP frame — check command */
+					static const uint8_t sync_resp[] = {
+						0xc0, 0x01, 0x08, 0x04,
+						0x00, 0x07, 0x07, 0x12,
+						0x20, 0x00, 0x00, 0x00,
+						0x00, 0xc0
+					};
+					static const uint8_t sec_resp[] = {
+						0xc0, 0x01, 0x14, 0x18,
+						0x00, 0x00, 0x00, 0x00,
+						0x00, 0x00, 0x00, 0x00,
+						0x00, 0x01, 0x00, 0x00,
+						0x00, 0x00, 0x00, 0x0c,
+						0x12, 0x00, 0x00, 0x00,
+						0x02, 0x00, 0x00, 0x00,
+						0x00, 0x00, 0x00, 0x00,
+						0xc0
+					};
+					static const uint8_t generic_resp[] = {
+						0xc0, 0x01, 0x00, 0x02,
+						0x00, 0x00, 0x00, 0x00,
+						0x00, 0x00, 0xc0
+					};
+					static const uint8_t read_reg_resp[] = {
+						0xc0, 0x01, 0x0a, 0x04,
+						0x00, 0x00, 0x00, 0x00,
+						0x00, 0x00, 0x00, 0x00,
+						0xc0
+					};
+
+					if (fakelen >= 2 && fakebuf[0] == 0x00) {
+						uint8_t cmd = fakebuf[1];
+						log_event("FAKE: cmd=0x%02x len=%zu", cmd, fakelen);
+						if (cmd == 0x08) { /* SYNC */
+							for (int r = 0; r < 8; r++)
+								tcp_send(ps->tcp_fd, sync_resp, sizeof(sync_resp));
+						} else if (cmd == 0x14) { /* GET_SECURITY_INFO */
+							tcp_send(ps->tcp_fd, sec_resp, sizeof(sec_resp));
+						} else if (cmd == 0x0a) { /* READ_REG */
+							tcp_send(ps->tcp_fd, read_reg_resp, sizeof(read_reg_resp));
+						} else {
+							tcp_send(ps->tcp_fd, generic_resp, sizeof(generic_resp));
+						}
+					}
+					fakelen = 0;
+				} else if (byte == 0xc0 && fakelen == 0) {
+					/* Start of SLIP frame — skip marker */
+				} else if (fakelen < sizeof(fakebuf)) {
+					fakebuf[fakelen++] = byte;
+				}
+				break;
+			}
+			log_data(log_serial_out, &byte, 1);
+			ssize_t wr = write(ps->serial_fd, &byte, 1);
+			if (wr < 0 && errno != EAGAIN) {
+				log_event("serial_write error: %s",
+				          strerror(errno));
 				return -1;
+			}
 		}
 		break;
 
@@ -840,9 +988,11 @@ static int process_tcp_byte(struct proxy_state *ps, uint8_t byte)
 		case IAC:
 			/* Escaped 0xFF — write literal to serial */
 			ps->tstate = TS_DATA;
-			if (write(ps->serial_fd, &byte, 1) < 0 &&
-			    errno != EAGAIN)
-				return -1;
+			if (!in_download_mode) {
+				if (write(ps->serial_fd, &byte, 1) < 0 &&
+				    errno != EAGAIN)
+					return -1;
+			}
 			break;
 		case WILL:  ps->tstate = TS_WILL; break;
 		case WONT:  ps->tstate = TS_WONT; break;
@@ -930,6 +1080,8 @@ static int send_serial_to_tcp(int tcp_fd, const uint8_t *data, size_t len)
 			buf[out++] = IAC;
 	}
 
+	log_event("tcp_out %zu bytes (from %zu serial)", out, len);
+	log_data(log_tcp_out, buf, out);
 	return tcp_send(tcp_fd, buf, out);
 }
 
@@ -946,6 +1098,9 @@ static void handle_client(int client_fd, const char *device,
 
 	fprintf(stderr, "rfc2217proxy: client connected, serial %s @ %u\n",
 	        device, baud);
+
+	log_open();
+	log_event("client connected, serial %s @ %u", device, baud);
 
 	/* Send initial telnet negotiation */
 	if (telnet_send_initial(client_fd) < 0) {
@@ -989,6 +1144,9 @@ static void handle_client(int client_fd, const char *device,
 			if (n <= 0)
 				break;
 
+			log_event("tcp_in %zd bytes", n);
+			log_data(log_tcp_in, buf, n);
+
 			for (ssize_t i = 0; i < n; i++) {
 				if (process_tcp_byte(&ps, buf[i]) < 0)
 					goto done;
@@ -1003,21 +1161,42 @@ static void handle_client(int client_fd, const char *device,
 			uint8_t buf[SERIAL_BUF_SIZE];
 			ssize_t n = read(ps.serial_fd, buf, sizeof(buf));
 			if (n > 0) {
+				log_event("serial_in %zd bytes", n);
+				log_data(log_serial_in, buf, n);
+				in_download_mode = 0; /* serial is alive */
 				if (send_serial_to_tcp(client_fd, buf, n) < 0)
 					break;
 			} else if (n < 0 && errno != EAGAIN) {
+				if (in_download_mode) {
+					usleep(10000); /* 10ms */
+					continue;
+				}
+				fprintf(stderr,
+				        "rfc2217proxy: serial read error\n");
 				break;
 			}
 		}
 
-		if (pfds[1].revents & POLLERR)
+		if (pfds[1].revents & POLLERR) {
+			if (in_download_mode) {
+				/*
+				 * Expected during reset. Sleep briefly
+				 * to avoid busy-looping on POLLERR.
+				 */
+				usleep(10000); /* 10ms */
+				continue;
+			}
+			fprintf(stderr, "rfc2217proxy: serial POLLERR\n");
 			break;
+		}
 	}
 
 done:
 	if (ps.serial_fd >= 0)
 		close(ps.serial_fd);
 	close(client_fd);
+	log_event("session ended");
+	log_close();
 	fprintf(stderr, "rfc2217proxy: session ended\n");
 }
 

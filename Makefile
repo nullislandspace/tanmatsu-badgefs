@@ -45,9 +45,13 @@ PROXY_LDFLAGS = $(shell pkg-config libusb-1.0 --libs)
 RFC2217_TARGET = rfc2217proxy
 RFC2217_CFLAGS = -Wall -Wextra -g
 
+# ESP32-P4 reset/bootloader test tool (for development)
+TEST_RESET_TARGET = test_reset
+TEST_RESET_CFLAGS = -Wall -g
+
 .PHONY: all clean install uninstall help
 
-all: $(TARGET) $(PROXY_TARGET) $(RFC2217_TARGET)
+all: $(TARGET) $(PROXY_TARGET) $(RFC2217_TARGET) $(TEST_RESET_TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)
@@ -58,14 +62,17 @@ $(PROXY_TARGET): badgelinkproxy.c
 $(RFC2217_TARGET): rfc2217proxy.c
 	$(CC) $(RFC2217_CFLAGS) $< -o $@
 
+$(TEST_RESET_TARGET): test_reset.c stub_esp32p4.h
+	$(CC) $(TEST_RESET_CFLAGS) $< -o $@
+
 %.o: %.c $(HEADERS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(PROXY_TARGET) $(RFC2217_TARGET)
+	rm -f $(OBJS) $(TARGET) $(PROXY_TARGET) $(RFC2217_TARGET) $(TEST_RESET_TARGET)
 
 # Install to /usr/local/bin (requires sudo)
-install: $(TARGET) $(PROXY_TARGET) $(RFC2217_TARGET)
+install: $(TARGET) $(PROXY_TARGET) $(RFC2217_TARGET) $(TEST_RESET_TARGET)
 	install -m 755 $(TARGET) /usr/local/bin/
 	install -m 755 $(PROXY_TARGET) /usr/local/bin/
 	install -m 755 $(RFC2217_TARGET) /usr/local/bin/
