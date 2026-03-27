@@ -50,6 +50,7 @@ static void print_usage(const char *progname)
         "  -s              Run single-threaded\n"
         "  -o <options>    Mount options (comma-separated)\n"
         "  --proxy <host:port>  Connect via TCP proxy instead of USB\n"
+        "                       (falls back to BADGELINKPORT env var)\n"
         "  --version1      Force protocol version 1 (legacy mode)\n"
         "  -h, --help      Show this help message\n"
         "  -V, --version   Show version\n"
@@ -180,6 +181,15 @@ int main(int argc, char *argv[])
     if (force_v1_flag) {
         printf("BadgeFS: Forcing protocol version 1 (legacy mode)\n");
         badgefs_backend_badgelink_force_v1();
+    }
+
+    /* Fall back to BADGELINKPORT environment variable if --proxy not given */
+    if (!proxy_arg) {
+        const char *env_proxy = getenv("BADGELINKPORT");
+        if (env_proxy && env_proxy[0] != '\0') {
+            printf("BadgeFS: Using BADGELINKPORT=%s\n", env_proxy);
+            proxy_arg = env_proxy;
+        }
     }
 
     /* Apply proxy setting if set */
