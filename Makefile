@@ -49,7 +49,9 @@ RFC2217_CFLAGS = -Wall -Wextra -g
 TEST_RESET_TARGET = test_reset
 TEST_RESET_CFLAGS = -Wall -g
 
-.PHONY: all clean install uninstall help
+.PHONY: all build clean install uninstall help
+
+build: all
 
 all: $(TARGET) $(PROXY_TARGET) $(RFC2217_TARGET) $(TEST_RESET_TARGET)
 
