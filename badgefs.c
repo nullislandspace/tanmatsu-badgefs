@@ -56,6 +56,7 @@ static void print_usage(const char *progname)
         "  -V, --version   Show version\n"
         "\n"
         "Common mount options (-o):\n"
+        "  proxy=<host:port>   Connect via TCP proxy instead of USB\n"
         "  allow_other     Allow other users to access the filesystem\n"
         "  allow_root      Allow root to access the filesystem\n"
         "  default_permissions  Enable permission checking by kernel\n"
@@ -63,7 +64,7 @@ static void print_usage(const char *progname)
         "Examples:\n"
         "  mkdir /tmp/mnt\n"
         "  %s /tmp/mnt                          # Mount via USB\n"
-        "  %s --proxy localhost:4002 /tmp/mnt    # Mount via proxy\n"
+        "  %s --proxy localhost:4003 /tmp/mnt    # Mount via proxy\n"
         "  %s -f /tmp/mnt                        # Mount in foreground\n"
         "  %s -u /tmp/mnt                        # Unmount filesystem\n"
         "\n"
@@ -108,6 +109,8 @@ int main(int argc, char *argv[])
     int force_v1_flag = 0;
     const char *proxy_arg = NULL;
     const char *mountpoint = NULL;
+    const char *first_positional = NULL;
+    int positional_count = 0;
     int new_argc = 0;
     char **new_argv = malloc((argc + 2) * sizeof(char *));  /* +2 for -s flag */
     if (!new_argv) {
@@ -152,11 +155,69 @@ int main(int argc, char *argv[])
             }
             continue;  /* Don't pass --proxy to FUSE */
         }
-        new_argv[new_argc++] = argv[i];
-        /* Track mountpoint (last non-option argument) */
+        if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            /* Parse -o options, extract proxy=host:port, pass rest to FUSE */
+            const char *opts = argv[++i];
+            char *opts_copy = strdup(opts);
+            if (!opts_copy) {
+                fprintf(stderr, "Error: Out of memory\n");
+                free(new_argv);
+                return 1;
+            }
+            char *filtered = malloc(strlen(opts) + 1);
+            if (!filtered) {
+                fprintf(stderr, "Error: Out of memory\n");
+                free(opts_copy);
+                free(new_argv);
+                return 1;
+            }
+            filtered[0] = '\0';
+            char *saveptr;
+            char *token = strtok_r(opts_copy, ",", &saveptr);
+            while (token) {
+                if (strncmp(token, "proxy=", 6) == 0) {
+                    proxy_arg = opts + (token - opts_copy) + 6;
+                } else {
+                    if (filtered[0] != '\0')
+                        strcat(filtered, ",");
+                    strcat(filtered, token);
+                }
+                token = strtok_r(NULL, ",", &saveptr);
+            }
+            free(opts_copy);
+            if (filtered[0] != '\0') {
+                new_argv[new_argc++] = "-o";
+                new_argv[new_argc++] = filtered;
+            } else {
+                free(filtered);
+            }
+            continue;
+        }
+        /* Track non-option (positional) arguments */
         if (argv[i][0] != '-') {
+            positional_count++;
+            if (positional_count == 1) {
+                first_positional = argv[i];
+            }
             mountpoint = argv[i];
         }
+        new_argv[new_argc++] = argv[i];
+    }
+
+    /*
+     * When invoked via mount/fstab as mount.badgefs, the call is:
+     *   mount.badgefs <source> <mountpoint> -o <opts>
+     * FUSE only expects one positional arg (the mountpoint), so we need
+     * to strip the source argument.
+     */
+    if (positional_count == 2) {
+        int dst = 0;
+        for (int src = 0; src < new_argc; src++) {
+            if (new_argv[src] == first_positional)
+                continue;
+            new_argv[dst++] = new_argv[src];
+        }
+        new_argc = dst;
     }
 
     /* Handle unmount request */
@@ -198,7 +259,7 @@ int main(int argc, char *argv[])
         int port;
         const char *colon = strrchr(proxy_arg, ':');
         if (!colon || colon == proxy_arg) {
-            fprintf(stderr, "Error: --proxy requires host:port format (e.g., localhost:4002)\n");
+            fprintf(stderr, "Error: --proxy requires host:port format (e.g., localhost:4003)\n");
             free(new_argv);
             return 1;
         }

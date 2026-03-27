@@ -76,11 +76,13 @@ install: $(TARGET) $(PROXY_TARGET) $(RFC2217_TARGET)
 	install -m 755 $(TARGET) /usr/local/bin/
 	install -m 755 $(PROXY_TARGET) /usr/local/bin/
 	install -m 755 $(RFC2217_TARGET) /usr/local/bin/
+	ln -sf /usr/local/bin/$(TARGET) /usr/sbin/mount.badgefs
 
 uninstall:
 	rm -f /usr/local/bin/$(TARGET)
 	rm -f /usr/local/bin/$(PROXY_TARGET)
 	rm -f /usr/local/bin/$(RFC2217_TARGET)
+	rm -f /usr/sbin/mount.badgefs
 
 mount: $(TARGET)
 	mkdir -p /tmp/mnt

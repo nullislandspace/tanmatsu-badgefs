@@ -112,16 +112,48 @@ make umount
 ./badgefs [options] <mountpoint>
 
 Options:
-  -u          Unmount the filesystem
-  -f          Foreground mode (recommended)
-  -d          Debug mode (verbose output)
-  -o <opts>   FUSE mount options
-  -h          Show help
+  -u                    Unmount the filesystem
+  -f                    Foreground mode (recommended)
+  -d                    Debug mode (verbose output)
+  -o <opts>             FUSE mount options
+  --proxy <host:port>   Connect via TCP proxy instead of USB
+  --version1            Force protocol version 1 (legacy mode)
+  -h                    Show help
 ```
 
 Single-threaded mode is automatically enabled (USB communication is not thread-safe).
 
 The badge connection is validated before mounting - if the badge is not connected, badgefs will exit with an error instead of creating an unusable mount.
+
+### TCP Proxy
+
+BadgeFS can connect to the badge via a TCP proxy instead of direct USB. The proxy address can be specified in three ways (in order of priority):
+
+1. `--proxy host:port` command-line argument
+2. `-o proxy=host:port` mount option (works with fstab)
+3. `BADGELINKPORT` environment variable
+
+### fstab
+
+After installing (`sudo make install`), you can add an fstab entry for user-mountable access:
+
+```
+badgefs  /mnt/badge  fuse.badgefs  noauto,user,proxy=localhost:4003  0  0
+```
+
+Then mount and unmount with:
+
+```bash
+mkdir -p /mnt/badge
+mount /mnt/badge
+umount /mnt/badge
+```
+
+For direct USB (no proxy), omit the `proxy=` option:
+
+```
+badgefs  /mnt/badge  fuse.badgefs  noauto,user  0  0
+```
 
 ## Dependencies
 
