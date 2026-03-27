@@ -20,6 +20,7 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <libusb-1.0/libusb.h>
 
@@ -31,9 +32,9 @@
 #define BADGELINK_EP_IN     0x81
 
 /* Proxy settings */
-#define DEFAULT_PORT        4002
+#define DEFAULT_PORT        4003
 #define USB_TIMEOUT_MS      5
-#define USB_MAX_PACKET_SIZE 32
+#define USB_MAX_PACKET_SIZE 512
 #define TCP_BUF_SIZE        65536
 
 static volatile sig_atomic_t running = 1;
@@ -196,8 +197,6 @@ static void handle_client(int client_fd, libusb_context *ctx)
                     goto done;
                 }
                 sent += transferred;
-                if (sent < (size_t)n)
-                    usleep(10000); /* 10ms inter-chunk delay */
             }
         }
 
@@ -320,6 +319,8 @@ int main(int argc, char *argv[])
         }
 
         fprintf(stderr, "proxy: client connected\n");
+        int flag = 1;
+        setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
         handle_client(client_fd, ctx);
     }
 

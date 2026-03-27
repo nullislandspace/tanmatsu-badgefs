@@ -158,8 +158,8 @@ int badgelink_tcp_write(struct badgelink_tcp *tcp, const uint8_t *data,
  * Mirrors badgelink_usb_read() behavior: reads in a loop with short
  * timeouts, returning all available data.
  */
-#define TCP_READ_TIMEOUT_MS 5
-#define TCP_READ_CHUNK_SIZE 32
+#define TCP_READ_TIMEOUT_MS 100
+#define TCP_READ_CHUNK_SIZE 4096
 
 int badgelink_tcp_read(struct badgelink_tcp *tcp, uint8_t *buf,
                        size_t max_len, int timeout_ms)
